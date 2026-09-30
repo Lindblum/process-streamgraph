@@ -1,0 +1,448 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace ProcessStreamgraph
+{
+    internal sealed class MainForm : Form, IMessageFilter
+    {
+        private readonly ProcessMonitor monitor = new ProcessMonitor();
+        private readonly IconCache icons = new IconCache();
+        private readonly ProcessTreePanel treePanel;
+        private readonly ProcessTree tree;
+        private readonly StreamGraphControl[] streamGraphs;
+        private readonly TableLayoutPanel graphs;
+        private readonly Panel graphFiller;
+        private readonly SplitContainer split;
+        private readonly Timer timer;
+        private Control toolbar;
+        private ComboBox[] dropdowns;
+        private NumericUpDown refreshSeconds;
+        // Time-axis spans, in seconds, that the mouse wheel steps through over the graphs.
+        private static readonly int[] ZoomSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
+        private int zoom = ZoomSpans.Length - 1;
+        private int wheelRemainder;
+        private readonly ProcessMenu processMenu;
+        private bool arranging;     // true while nodes are being reordered, when selection events are noise
+
+        public MainForm()
+        {
+            Text = "Process Streamgraph";
+            Font = SystemFonts.MessageBoxFont;
+            // Sizes below are in 96-DPI units; OnLoad scales them for the monitor the window opens on.
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(1880, 900);
+            StartPosition = FormStartPosition.CenterScreen;
+
+            treePanel = new ProcessTreePanel { Dock = DockStyle.Fill };
+            tree = treePanel.Tree;
+            tree.ImageList = icons.SmallImages;
+            tree.AfterSelect += (s, e) => { if (!arranging) SetSelected(e.Node?.Tag as ProcInfo); };
+            tree.SortChanged += ArrangeTree;
+            tree.NetworkAvailable = monitor.NetworkAvailable;
+            tree.ColumnsChanged += delta =>
+            {
+                // The tree pane grows or shrinks with its columns, so the name column keeps its room.
+                int target = split.SplitterDistance + delta * DeviceDpi / 96;
+                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min(target, MaxTreePane));
+            };
+            processMenu = new ProcessMenu(monitor, this);
+            tree.MouseUp += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Right || !(tree.GetNodeAt(e.Location) is TreeNode node)) return;
+                tree.SelectedNode = node;
+                processMenu.Show((ProcInfo)node.Tag, tree.PointToScreen(e.Location));
+            };
+            tree.KeyDown += (s, e) =>
+            {
+                // The keyboard's menu key, and its Shift+F10 equivalent, open the menu for the selected row.
+                bool menuKey = e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift);
+                if (!menuKey || tree.SelectedNode == null) return;
+                Rectangle row = tree.SelectedNode.Bounds;
+                processMenu.Show((ProcInfo)tree.SelectedNode.Tag, tree.PointToScreen(new Point(row.Left, row.Bottom)));
+                e.Handled = true;
+            };
+
+            // The panel's own colour shows as the one-pixel rules between the graphs.
+            graphs = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
+            graphs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            var metrics = new[] { Metric.Cpu, Metric.Memory, Metric.Network };
+            streamGraphs = new StreamGraphControl[metrics.Length];
+            for (int i = 0; i < metrics.Length; i++)
+            {
+                var graph = new StreamGraphControl(monitor, icons, metrics[i])
+                {
+                    Dock = DockStyle.Fill,
+                    Margin = new Padding(0, i == 0 ? 0 : 1, 0, 0)
+                };
+                graph.ProcessClicked += SelectInTree;
+                graph.ProcessMenuRequested += processMenu.Show;
+                graph.ElevationRequested += RestartElevated;
+                graph.CollapsedChanged += LayoutGraphs;
+                streamGraphs[i] = graph;
+                graphs.RowStyles.Add(new RowStyle());
+                graphs.Controls.Add(graph, 0, i);
+            }
+            // Takes up the space below the headings when every graph is collapsed.
+            graphFiller = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 1, 0, 0) };
+            graphs.RowStyles.Add(new RowStyle());
+            graphs.Controls.Add(graphFiller, 0, metrics.Length);
+            LayoutGraphs();
+            FontChanged += (s, e) => LayoutGraphs();
+
+            split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
+            split.Panel1.Controls.Add(treePanel);
+            split.Panel2.Controls.Add(graphs);
+
+            Controls.Add(split);
+            Controls.Add(toolbar = BuildToolbar());
+            split.SplitterDistance = TreeWidth;
+            ApplyTheme(Theme.SystemDefault);
+
+            timer = new Timer { Interval = 1000 };
+            timer.Tick += (s, e) => TakeSample();
+            Application.AddMessageFilter(this);
+        }
+
+        /// <summary>
+        /// Mouse wheel over a graph zooms the time axis of all of them. Done as a message filter because
+        /// wheel messages otherwise go to whichever control has the focus, normally the tree.
+        /// </summary>
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (m.Msg != NativeMethods.WM_MOUSEWHEEL) return false;
+            long position = m.LParam.ToInt64();
+            var point = new Point((short)(position & 0xFFFF), (short)((position >> 16) & 0xFFFF));
+            if (!(FromHandle(NativeMethods.WindowFromPoint(point)) is StreamGraphControl)) return false;
+
+            // One notch is 120 units; precision wheels and touchpads send smaller amounts.
+            wheelRemainder += (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+            int notches = wheelRemainder / 120;
+            wheelRemainder -= notches * 120;
+            int target = Math.Max(0, Math.Min(ZoomSpans.Length - 1, zoom - notches));
+            if (target != zoom)
+            {
+                zoom = target;
+                foreach (StreamGraphControl graph in streamGraphs) graph.VisibleSeconds = ZoomSpans[zoom];
+            }
+            return true;
+        }
+
+        // Default width of the tree pane, in 96-DPI units: the shown columns plus room for process names.
+        private int TreeWidth => tree.ShownColumnsWidth + 250;
+
+        // The tree pane never takes more than this, so the graphs keep a usable width.
+        private int MaxTreePane => split.Width * 3 / 5;
+
+        /// <summary>Collapsed graphs get just their heading line; the open ones share the rest equally.</summary>
+        private void LayoutGraphs()
+        {
+            int open = 0;
+            foreach (StreamGraphControl graph in streamGraphs)
+                if (!graph.Collapsed) open++;
+
+            graphs.SuspendLayout();
+            for (int i = 0; i < streamGraphs.Length; i++)
+            {
+                StreamGraphControl graph = streamGraphs[i];
+                graphs.RowStyles[i] = graph.Collapsed
+                    ? new RowStyle(SizeType.Absolute, graph.HeadingHeight + graph.Margin.Vertical)
+                    : new RowStyle(SizeType.Percent, 100f / open);
+            }
+            graphs.RowStyles[streamGraphs.Length] = open == 0 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, 0);
+            graphFiller.Visible = open == 0;
+            graphs.ResumeLayout();
+        }
+
+        private void RestartElevated()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = true, Verb = "runas" });
+            }
+            catch (Win32Exception)
+            {
+                return;     // the elevation prompt was declined
+            }
+            Close();
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            // The layout above is in 96-DPI units, while WinForms starts out assuming the system DPI.
+            if (DeviceDpi != 96)
+            {
+                float factor = DeviceDpi / 96f;
+                Scale(new SizeF(factor, factor));
+            }
+
+            // When the window opens on a monitor whose scale differs from the system DPI, WinForms
+            // keeps the system value and nothing tells it otherwise. Replaying the DPI-changed
+            // message Windows would send on a monitor move lets it rescale fonts and layout itself.
+            int actualDpi = NativeMethods.GetDpiForWindow(Handle);
+            float toActual = actualDpi / (float)DeviceDpi;
+            Rectangle area = Screen.FromHandle(Handle).WorkingArea;
+            int width = Math.Min((int)(Width * toActual), area.Width), height = Math.Min((int)(Height * toActual), area.Height);
+            var bounds = new Rectangle(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height);
+            if (actualDpi != DeviceDpi)
+            {
+                var rect = new NativeMethods.RECT { Left = bounds.Left, Top = bounds.Top, Right = bounds.Right, Bottom = bounds.Bottom };
+                NativeMethods.SendMessage(Handle, NativeMethods.WM_DPICHANGED, (IntPtr)((actualDpi << 16) | actualDpi), ref rect);
+            }
+            else
+            {
+                Bounds = bounds;
+            }
+            // The rescaling above does not reliably carry the splitter along, so place it explicitly.
+            split.SplitterDistance = Math.Min(TreeWidth * actualDpi / 96, MaxTreePane);
+            icons.SetSmallSize(16 * actualDpi / 96);
+            NativeMethods.SetDarkTitleBar(Handle, streamGraphs[0].Theme.IsDark);
+            base.OnLoad(e);
+
+            TakeSample();
+            timer.Start();
+        }
+
+        private Control BuildToolbar()
+        {
+            var bar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                Padding = new Padding(6, 4, 6, 4)
+            };
+
+            var sort = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
+            sort.Items.AddRange(new object[] { "Usage", "Start time", "Name", "Process ID" });
+            sort.SelectedIndex = 0;
+            sort.SelectedIndexChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.SortMode = (SortMode)sort.SelectedIndex;
+            };
+
+            var reverse = new CheckBox { Text = "Reverse", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(6, 3, 18, 3) };
+            reverse.CheckedChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.Reverse = reverse.Checked;
+            };
+
+            Theme initial = Theme.SystemDefault;
+            var themes = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
+            foreach (Theme theme in Theme.All) themes.Items.Add(theme.Name);
+            themes.SelectedIndex = Array.IndexOf(Theme.All, initial);
+            themes.SelectedIndexChanged += (s, e) => ApplyTheme(Theme.All[themes.SelectedIndex]);
+
+            bar.Controls.Add(new Label { Text = "Sort layers by:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(sort);
+            bar.Controls.Add(reverse);
+            bar.Controls.Add(new Label { Text = "Theme:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(themes);
+
+            refreshSeconds = new NumericUpDown
+            {
+                Minimum = (decimal)ProcessMonitor.MinIntervalSeconds,
+                Maximum = 60,
+                Increment = 0.5m,
+                DecimalPlaces = 1,
+                Value = 1,
+                Width = 56,
+                TextAlign = HorizontalAlignment.Right,
+                Margin = new Padding(3, 3, 0, 3)
+            };
+            refreshSeconds.ValueChanged += (s, e) => timer.Interval = (int)(refreshSeconds.Value * 1000);
+            bar.Controls.Add(new Label { Text = "Refresh every:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(21, 0, 3, 0) });
+            bar.Controls.Add(refreshSeconds);
+            bar.Controls.Add(new Label { Text = "seconds", AutoSize = true, Anchor = AnchorStyles.Left });
+            dropdowns = new[] { sort, themes };
+            return bar;
+        }
+
+        private void ApplyTheme(Theme theme)
+        {
+            BackColor = theme.Control;
+            ForeColor = theme.ControlText;
+            toolbar.BackColor = theme.Control;
+            toolbar.ForeColor = theme.ControlText;
+            foreach (ComboBox dropdown in dropdowns)
+            {
+                // The standard combo box ignores colours, so the dark theme uses the flat one.
+                dropdown.FlatStyle = theme.IsDark ? FlatStyle.Flat : FlatStyle.Standard;
+                dropdown.BackColor = theme.IsDark ? theme.InactiveSelection : theme.Window;
+                dropdown.ForeColor = theme.WindowText;
+            }
+            refreshSeconds.BackColor = theme.IsDark ? theme.InactiveSelection : theme.Window;
+            refreshSeconds.ForeColor = theme.WindowText;
+            split.BackColor = theme.Control;
+            graphs.BackColor = theme.Border;
+            graphFiller.BackColor = theme.Surface;
+            treePanel.ApplyTheme(theme);
+            foreach (StreamGraphControl graph in streamGraphs) graph.Theme = theme;
+            processMenu.Theme = theme;
+            if (IsHandleCreated) NativeMethods.SetDarkTitleBar(Handle, theme.IsDark);
+        }
+
+        private void TakeSample()
+        {
+            monitor.Sample();
+            ProcessActions.UpdateWindowStates(monitor.Processes);
+            SyncTree();
+            foreach (StreamGraphControl graph in streamGraphs) graph.Rebuild();
+        }
+
+        private void SyncTree()
+        {
+            // Adding, expanding and reselecting rows all make the control scroll by itself, so note
+            // which row is at the top and put it back there afterwards.
+            TreeNode top = tree.TopNode;
+
+            List<ProcInfo> added = monitor.Added, removed = monitor.Removed;
+            if (added.Count > 0 || removed.Count > 0)
+            {
+                tree.BeginUpdate();
+                foreach (ProcInfo p in removed)
+                {
+                    TreeNode node = p.Node;
+                    if (node == null) continue;
+                    // Keep the graphs' outline on the exited process rather than letting the tree
+                    // move the selection to a neighbour.
+                    if (tree.SelectedNode == node) tree.SelectedNode = null;
+                    // Orphans move to the top level, as in Process Explorer.
+                    while (node.Nodes.Count > 0)
+                    {
+                        TreeNode child = node.Nodes[0];
+                        child.Remove();
+                        tree.Nodes.Add(child);
+                    }
+                    node.Remove();
+                    p.Node = null;
+                }
+
+                // Oldest first, so a parent created in the same interval gets its node before its children.
+                added.Sort((a, b) => a.CreateTime.CompareTo(b.CreateTime));
+                foreach (ProcInfo p in added)
+                {
+                    int image = icons.GetSmallIndex(p.Path);
+                    p.Node = new TreeNode(p.Name, image, image) { Tag = p };
+                    PlaceNode(p);
+                }
+                tree.EndUpdate();
+            }
+
+            if (tree.SortColumn.HasValue) SortList();
+            if (top != null && top.TreeView == tree && tree.TopNode != top) tree.TopNode = top;
+            tree.Invalidate();
+        }
+
+        /// <summary>Adds a process's node under its parent in tree view, or at the top level in a sorted list.</summary>
+        private void PlaceNode(ProcInfo p)
+        {
+            // A parent PID can belong to a newer, unrelated process once the real parent has exited.
+            ProcInfo parent = !tree.SortColumn.HasValue && p.ParentPid != 0 && p.ParentPid != p.Pid
+                ? monitor.FindLive(p.ParentPid)
+                : null;
+            if (parent?.Node != null && parent.Node != p.Node && parent.CreateTime <= p.CreateTime)
+            {
+                parent.Node.Nodes.Add(p.Node);
+                if (parent.Node.Nodes.Count == 1) parent.Node.Expand();
+            }
+            else
+            {
+                tree.Nodes.Add(p.Node);
+            }
+        }
+
+        /// <summary>Rebuilds the node layout after a header click switches between tree and sorted list.</summary>
+        private void ArrangeTree()
+        {
+            var live = new List<ProcInfo>();
+            foreach (ProcInfo p in monitor.Processes)
+                if (p.Node != null) live.Add(p);
+            // Tree view is built oldest first, so parents are in place before their children.
+            if (tree.SortColumn.HasValue) live.Sort(tree.Compare);
+            else live.Sort((a, b) => a.CreateTime.CompareTo(b.CreateTime));
+
+            TreeNode selected = tree.SelectedNode;
+            arranging = true;
+            tree.BeginUpdate();
+            tree.Nodes.Clear();
+            foreach (ProcInfo p in live) p.Node.Nodes.Clear();
+            // A flat list has no expanders, so it does not need the column reserved for them.
+            tree.ShowRootLines = !tree.SortColumn.HasValue;
+            foreach (ProcInfo p in live) PlaceNode(p);
+            tree.SelectedNode = selected;
+            selected?.EnsureVisible();
+            tree.EndUpdate();
+            arranging = false;
+        }
+
+        /// <summary>
+        /// Puts the list back in sort order after a sample has changed the values. The rows themselves
+        /// stay where they are and the processes are dealt out to them afresh; removing and re-adding
+        /// rows would send the list back to the top each time.
+        /// </summary>
+        private void SortList()
+        {
+            TreeNodeCollection rows = tree.Nodes;
+            var sorted = new ProcInfo[rows.Count];
+            for (int i = 0; i < sorted.Length; i++) sorted[i] = (ProcInfo)rows[i].Tag;
+            Array.Sort(sorted, tree.Compare);
+
+            var selected = tree.SelectedNode?.Tag as ProcInfo;
+            for (int i = 0; i < sorted.Length; i++)
+            {
+                TreeNode row = rows[i];
+                ProcInfo process = sorted[i];
+                if (row.Tag == process) continue;
+                row.Tag = process;
+                process.Node = row;
+                if (row.Text != process.Name) row.Text = process.Name;
+                int image = icons.GetSmallIndex(process.Path);
+                if (row.ImageIndex != image) row.ImageIndex = row.SelectedImageIndex = image;
+            }
+
+            // The selection stays with the process, not the row.
+            if (selected != null && tree.SelectedNode != selected.Node)
+            {
+                arranging = true;
+                tree.SelectedNode = selected.Node;
+                arranging = false;
+            }
+        }
+
+        private void SetSelected(ProcInfo process)
+        {
+            foreach (StreamGraphControl graph in streamGraphs) graph.Selected = process;
+        }
+
+        private void SelectInTree(ProcInfo process)
+        {
+            if (process.Node == null)
+            {
+                // Already exited: nothing to select in the tree, but still mark it in both graphs.
+                SetSelected(process);
+                return;
+            }
+            tree.SelectedNode = process.Node;
+            process.Node.EnsureVisible();
+            tree.Focus();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Application.RemoveMessageFilter(this);
+                processMenu.Dispose();
+                timer.Dispose();
+                monitor.Dispose();
+                icons.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+}

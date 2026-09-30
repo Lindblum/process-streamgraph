@@ -1,0 +1,12 @@
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.exe.config
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.exe
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.pdb
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.csprojAssemblyReference.cache
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.AssemblyInfoInputs.cache
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.AssemblyInfo.cs
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.csproj.CoreCompileInputs.cache
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.exe
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.pdb
+C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.exe.config
+C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.exe
+C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.pdb
