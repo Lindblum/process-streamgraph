@@ -1,7 +1,6 @@
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.exe.config
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.exe
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\ProcessStreamgraph.pdb
-C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.csprojAssemblyReference.cache
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.AssemblyInfoInputs.cache
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.AssemblyInfo.cs
 C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.csproj.CoreCompileInputs.cache
@@ -10,3 +9,11 @@ C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\Pr
 C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.exe.config
 C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.exe
 C:\Users\david\AppData\Local\Temp\psg-verify\ProcessStreamgraph.pdb
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\bin\Release\net472\AppRatings.json
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.csproj.AssemblyReference.cache
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\david\Desktop\Projects-Claude\process-streamgraph\obj\Release\net472\ProcessStreamgraph.sourcelink.json
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\AppRatings.json
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.exe.config
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.exe
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.pdb

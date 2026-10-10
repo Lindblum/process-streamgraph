@@ -15,6 +15,7 @@ namespace ProcessStreamgraph
         public Color Border;
         public Color Selection, SelectionText;                  // selected tree row, tree focused
         public Color InactiveSelection, InactiveSelectionText;  // selected tree row, focus elsewhere
+        public Color Hover;                                     // row under the mouse
 
         // Graphs
         public Color Surface;
@@ -35,6 +36,7 @@ namespace ProcessStreamgraph
             SelectionText = SystemColors.HighlightText,
             InactiveSelection = SystemColors.Control,
             InactiveSelectionText = SystemColors.ControlText,
+            Hover = Rgb(0xe8f0fa),
 
             Surface = Rgb(0xfcfcfb),
             PrimaryInk = Rgb(0x0b0b0b),
@@ -59,6 +61,7 @@ namespace ProcessStreamgraph
             SelectionText = Color.White,
             InactiveSelection = Rgb(0x3a3a37),
             InactiveSelectionText = Rgb(0xe8e6df),
+            Hover = Rgb(0x2a2a28),
 
             Surface = Rgb(0x1a1a19),
             PrimaryInk = Color.White,

@@ -16,7 +16,8 @@ namespace ProcessStreamgraph
     {
         public int Pid;
         public int ParentPid;
-        public string Name;
+        public string Name;              // the program's file name, such as "brave.exe"
+        public string DisplayName;       // the name Task Manager uses, such as "Brave Browser"
         public string Path;
         public string CommandLine;       // null when it could not be read
         public string Arguments = "";    // the command line without the program name
@@ -29,6 +30,13 @@ namespace ProcessStreamgraph
         public long Memory;              // latest sample, private working set in bytes
         public double Network;           // latest sample, KB/s sent plus received
         public WindowState WindowState;
+        public SafetyReport Report;      // shared by every process running the same program file
+        public string Role;              // its part in its program, from the command line; null when unknown
+        public ServiceInfo[] Services;   // Windows services it hosts; null when none
+        public string WindowTitle;       // title of its frontmost window; null when it has none
+        public string WorkingFolder;     // for shells, script hosts and command-line tools; null otherwise
+        public string Details = "";      // the four above, as the Details column shows them
+        public Dictionary<Endpoint, Connection> Connections;   // traffic by remote endpoint; null before any
         public TreeNode Node;
 
         internal long LastCpuTime;
@@ -36,7 +44,63 @@ namespace ProcessStreamgraph
         internal readonly float[] MemHistory = new float[ProcessMonitor.HistoryLength];   // MB
         internal readonly float[] NetHistory = new float[ProcessMonitor.HistoryLength];   // KB/s
 
+        public Safety Safety => Report?.Overall ?? Safety.Unrated;
+
         public DateTime? StartTime => CreateTime > 0 ? DateTime.FromFileTimeUtc(CreateTime).ToLocalTime() : (DateTime?)null;
+
+        // Enough for any ordinary program; past this the endpoints longest idle make way, so that one
+        // talking to thousands of peers cannot use up memory.
+        private const int MaxConnections = 4000;
+
+        /// <summary>Adds traffic with one remote endpoint.</summary>
+        internal void AddTraffic(Endpoint remote, long sent, long received, DateTime now)
+        {
+            if (Connections == null) Connections = new Dictionary<Endpoint, Connection>();
+            if (!Connections.TryGetValue(remote, out Connection connection))
+            {
+                if (Connections.Count >= MaxConnections)
+                {
+                    Connection idlest = null;
+                    foreach (Connection c in Connections.Values)
+                        if (idlest == null || c.LastActive < idlest.LastActive) idlest = c;
+                    Connections.Remove(idlest.Endpoint);
+                }
+                Connections[remote] = connection = new Connection { Endpoint = remote };
+            }
+            connection.Sent += sent;
+            connection.Received += received;
+            connection.LastActive = now;
+        }
+
+        /// <summary>Rebuilds Details, and a service host's display name, after what they are made from changes.</summary>
+        public void RefreshDetails()
+        {
+            DisplayName = AppNames.DisplayNameOf(this);
+            var parts = new List<string>(3);
+            if (Services != null && Services.Length > 0)
+            {
+                // A service host is best known by its services; its command line only names their group.
+                parts.Add(Services.Length == 1 ? Services[0].DisplayName
+                    : Services.Length + " services: " + string.Join(", ", Array.ConvertAll(Services, s => s.DisplayName)));
+            }
+            else if (Role != null)
+            {
+                parts.Add(Role);
+            }
+            if (WorkingFolder != null) parts.Add("in " + ShortFolder(WorkingFolder));
+            if (!string.IsNullOrEmpty(WindowTitle)) parts.Add("\u201C" + WindowTitle + "\u201D");
+            Details = string.Join("  \u00B7  ", parts);
+        }
+
+        // The last two folders of a path, which is usually what tells projects apart: "Projects\\app".
+        private static string ShortFolder(string path)
+        {
+            string trimmed = path.TrimEnd('\\');
+            if (string.Equals(trimmed, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase))
+                return "home folder";
+            string[] parts = trimmed.Split('\\');
+            return parts.Length <= 2 ? trimmed + (parts.Length == 1 ? "\\" : "") : parts[parts.Length - 2] + "\\" + parts[parts.Length - 1];
+        }
 
         /// <summary>CPU percent, memory in MB or network KB/s at the given sample; 0 outside the process lifetime.</summary>
         public float Value(Metric metric, long sample)
@@ -54,10 +118,11 @@ namespace ProcessStreamgraph
     internal sealed class ProcessMonitor : IDisposable
     {
         // The history is a fixed number of samples: enough for the full time span at the shortest
-        // refresh interval, and more than enough at longer ones.
+        // refresh interval, plus a few seconds for the graphs, which trail the newest sample slightly
+        // so they can pan smoothly; more than enough at longer intervals.
         public const double MinIntervalSeconds = 0.5;
         public const int HistorySeconds = 300;
-        public const int HistoryLength = (int)(HistorySeconds / MinIntervalSeconds) + 1;
+        public const int HistoryLength = (int)((HistorySeconds + 5) / MinIntervalSeconds) + 1;
 
         private readonly Dictionary<int, ProcInfo> live = new Dictionary<int, ProcInfo>();
         private readonly List<ProcInfo> all = new List<ProcInfo>();
@@ -85,6 +150,9 @@ namespace ProcessStreamgraph
 
         /// <summary>False when per-process network traffic cannot be measured; those values are then all zero.</summary>
         public bool NetworkAvailable => network.Available;
+
+        /// <summary>The trace, for naming the addresses processes talk to.</summary>
+        public NetworkMonitor Network => network;
 
         /// <summary>True when network traffic is unavailable only because the process lacks the rights.</summary>
         public bool NetworkAccessDenied => network.AccessDenied;
@@ -125,6 +193,7 @@ namespace ProcessStreamgraph
                 throw new InvalidOperationException("NtQuerySystemInformation failed: 0x" + status.ToString("X8"));
 
             Dictionary<int, long> traffic = network.Drain();
+            Dictionary<NetworkMonitor.Flow, NetworkMonitor.FlowBytes> flows = network.DrainFlows();
             double seconds = elapsed100ns / 1e7;
 
             SampleIndex++;
@@ -173,6 +242,15 @@ namespace ProcessStreamgraph
                 entry = IntPtr.Add(entry, (int)spi.NextEntryOffset);
             }
 
+            // Traffic by endpoint goes to the processes as they now stand, new ones included.
+            if (flows.Count > 0)
+            {
+                DateTime now = DateTime.Now;
+                foreach (KeyValuePair<NetworkMonitor.Flow, NetworkMonitor.FlowBytes> flow in flows)
+                    if (live.TryGetValue(flow.Key.Pid, out ProcInfo owner))
+                        owner.AddTraffic(flow.Key.Remote, flow.Value.Sent, flow.Value.Received, now);
+            }
+
             foreach (ProcInfo p in all)
             {
                 if (p.Alive && p.LastSample != SampleIndex)
@@ -197,18 +275,30 @@ namespace ProcessStreamgraph
 
             string path = NativeMethods.GetImagePath(pid);
             string commandLine = pid == 0 || pid == 4 ? null : NativeMethods.GetCommandLine(pid);
-            return new ProcInfo
+            var parentPid = (int)spi.InheritedFromUniqueProcessId.ToInt64();
+            live.TryGetValue(parentPid, out ProcInfo parent);
+            string role = ProcessRoles.RoleOf(name, commandLine, (int)spi.SessionId, parent);
+            if (ProcessRoles.IsChromiumHelper(commandLine) && parent != null && parent.Role == null && string.Equals(parent.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                // Its helpers are what show a program's first process to be the one in charge.
+                parent.Role = "Main process";
+                parent.RefreshDetails();
+            }
+            var process = new ProcInfo
             {
                 Pid = pid,
-                ParentPid = (int)spi.InheritedFromUniqueProcessId.ToInt64(),
+                ParentPid = parentPid,
                 Name = name,
                 Path = path,
                 CommandLine = commandLine,
                 Arguments = ArgumentsOf(commandLine, path),
                 CreateTime = spi.CreateTime,
                 Color = ColorFor(name, pid),
-                FirstSample = SampleIndex
+                FirstSample = SampleIndex,
+                Role = role
             };
+            process.RefreshDetails();
+            return process;
         }
 
         // Drops the program name that a command line starts with.

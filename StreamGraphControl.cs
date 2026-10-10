@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -14,6 +15,11 @@ namespace ProcessStreamgraph
     /// Streamgraph of one metric over the monitor's history window, one layer per process.
     /// Layers are stacked up from zero in the current sort order. CPU and memory are drawn against a
     /// percentage scale, network traffic against a rate scale that fits the visible peak.
+    ///
+    /// The graph pans smoothly rather than stepping once per sample: it shows the data as of a display
+    /// time that runs with the clock about one refresh interval behind the newest sample, so each new
+    /// sample slides in from the right. The layers are drawn once per sample into a strip wider than
+    /// the plot, and each animation frame only shifts that strip.
     /// </summary>
     internal sealed class StreamGraphControl : Control
     {
@@ -49,11 +55,19 @@ namespace ProcessStreamgraph
         private int visibleSeconds = ProcessMonitor.HistorySeconds;
         private double scaleMax = 1, tickStep = 1;
         private RectangleF plot;
-        private float[] xs = new float[0];      // x of each visible sample, placed by the time it was taken
+        private float[] xs = new float[0];      // x of each sample were the newest at the plot's right edge
         private float pixelsPerUnit;
         private bool smooth;
-        private Bitmap cache;
+        private Bitmap cache;                   // heading and axes
+        private Bitmap strip;                   // the layers, over xs coordinates from stripLeft
+        private int stripLeft;
         private Font boldFont;
+
+        // Panning. anchorTime is when the newest sample was taken; viewTime is the moment shown at the
+        // right edge, which trails it. Both are seconds on the monitor's steady clock.
+        private double refreshSeconds = 1;
+        private double anchorTime, viewTime = double.NaN, lastFrame;
+        private int pan;                        // px the layers are shifted right: (anchorTime - viewTime) in pixels
 
         private bool mouseInside;
         private Point mouse;
@@ -126,6 +140,23 @@ namespace ProcessStreamgraph
             set { visibleSeconds = value; Rebuild(); }
         }
 
+        /// <summary>The sampling interval, which sets how far the display trails the newest sample.</summary>
+        public double RefreshSeconds
+        {
+            get => refreshSeconds;
+            set => refreshSeconds = value;
+        }
+
+        // How far behind the newest sample the display aims to run: one interval plus slack for timer
+        // jitter, so the next sample normally arrives before the display catches up with this one.
+        private double Lag => Math.Min(refreshSeconds + 0.15, MaxLag);
+
+        // How far behind it may fall before giving up and jumping ahead, e.g. after the computer sleeps.
+        // Bounded by the visible span so the strip stays at most twice the plot's width.
+        private double MaxLag => Math.Min(Math.Max(3, 3 * refreshSeconds), visibleSeconds);
+
+        private float PixelsPerSecond => plot.Width / visibleSeconds;
+
         /// <summary>Process whose layer is outlined, normally the one selected in the tree.</summary>
         public ProcInfo Selected
         {
@@ -178,6 +209,7 @@ namespace ProcessStreamgraph
             if (disposing)
             {
                 cache?.Dispose();
+                strip?.Dispose();
                 boldFont?.Dispose();
             }
             base.Dispose(disposing);
@@ -194,18 +226,24 @@ namespace ProcessStreamgraph
 
         private void BuildModel()
         {
-            // Every sample inside the time span, plus one older one so the bands run on to the left
-            // edge, where they are clipped.
+            // Every sample inside the time span, widened by how far the display may trail the newest
+            // sample, plus one older one so the bands run on to the left edge, where they are clipped.
             long latest = monitor.SampleIndex;
             int available = monitor.SampleCount;
             double now = available > 0 ? monitor.SampleSeconds(latest) : 0;
             n = 0;
-            while (n < available && now - monitor.SampleSeconds(latest - n) <= visibleSeconds) n++;
+            while (n < available && now - monitor.SampleSeconds(latest - n) <= visibleSeconds + MaxLag) n++;
             if (n < available) n++;
             firstSample = latest - n + 1;
+            anchorTime = now;
+            if (double.IsNaN(viewTime)) viewTime = now;
+            ClampViewTime();
+            // The layer coordinates below move with the new anchor; the pan must move with them in the
+            // same paint, or the layers would flick left for a frame each time a sample arrives.
+            pan = (int)Math.Round((anchorTime - viewTime) * PixelsPerSecond);
 
             if (xs.Length < n) xs = new float[n];
-            float pixelsPerSecond = plot.Width / visibleSeconds;
+            float pixelsPerSecond = PixelsPerSecond;
             for (int i = 0; i < n; i++)
                 xs[i] = plot.Right - (float)(now - monitor.SampleSeconds(firstSample + i)) * pixelsPerSecond;
             // Curves are not worth their cost once samples are packed closer than the eye can follow.
@@ -281,6 +319,49 @@ namespace ProcessStreamgraph
             return result;
         }
 
+        // ---------------------------------------------------------------- panning
+
+        /// <summary>
+        /// Advances the display time by the time elapsed since the last frame, and repaints when that
+        /// moves the layers by a pixel or more. Called by the window's animation timer.
+        /// </summary>
+        public void Animate()
+        {
+            double clock = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+            // A stalled UI thread should not send the graph racing to catch up in one frame.
+            double elapsed = lastFrame > 0 ? Math.Min(clock - lastFrame, 0.25) : 0;
+            lastFrame = clock;
+            if (!HasPlot || double.IsNaN(viewTime)) return;
+
+            // Run with the clock, eased towards the target lag: faster when behind it, slower when
+            // ahead, and never backwards, so the motion stays steady when the interval changes.
+            double behind = clock - Lag - viewTime;
+            double speed = Math.Max(0, Math.Min(3, 1 + behind));
+            viewTime += elapsed * speed;
+            ClampViewTime();
+            UpdatePan();
+        }
+
+        // The display never runs ahead of the data, which would leave a gap at the right edge, and
+        // jumps forward when it has fallen hopelessly behind.
+        private void ClampViewTime()
+        {
+            if (viewTime > anchorTime) viewTime = anchorTime;
+            if (viewTime < anchorTime - MaxLag) viewTime = anchorTime - MaxLag;
+        }
+
+        private void UpdatePan()
+        {
+            int value = (int)Math.Round((anchorTime - viewTime) * PixelsPerSecond);
+            if (value == pan) return;
+            pan = value;
+            // The layers move under a still pointer, so what it is over can change, and its tooltip
+            // can reach beyond the plot. Otherwise only the plot needs repainting.
+            if (mouseInside) UpdateHover();
+            if (hoverProcess != null) Invalidate();
+            else Invalidate(Rectangle.FromLTRB((int)plot.Left, 0, (int)Math.Ceiling(plot.Right) + 1, Height));
+        }
+
         private static double NiceStep(double raw)
         {
             double magnitude = Math.Pow(10, Math.Floor(Math.Log10(raw)));
@@ -288,6 +369,7 @@ namespace ProcessStreamgraph
             return (fraction < 1.5 ? 1 : fraction < 3.5 ? 2 : fraction < 7.5 ? 5 : 10) * magnitude;
         }
 
+        // In layer coordinates; the layers are drawn shifted right by pan.
         private float X(int index) => xs[index];
 
         private float Y(float value) => plot.Bottom - value * pixelsPerUnit;
@@ -378,7 +460,9 @@ namespace ProcessStreamgraph
         {
             layer = sample = -1;
             if (!HasPlot || layers.Length == 0 || point.Y < plot.Top || point.Y > plot.Bottom) return false;
-            if (point.X < plot.Left || point.X < X(0) || point.X > X(n - 1)) return false;
+            if (point.X < plot.Left || point.X > plot.Right) return false;
+            point.X -= pan;
+            if (point.X < X(0) || point.X > X(n - 1)) return false;
 
             // The pair of samples the point lies between, and how far along from the first it is.
             int i = 0, above = n - 1;
@@ -431,35 +515,57 @@ namespace ProcessStreamgraph
                 cache = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb);
             }
 
+            bool layersShown = false;
             using (Graphics g = Graphics.FromImage(cache))
             {
                 g.Clear(theme.Surface);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
                 DrawHeading(g);
-                if (collapsed || plot.Width <= 20 || plot.Height <= 20) return;
-                if (Unavailable)
+                if (!collapsed && plot.Width > 20 && plot.Height > 20)
                 {
-                    DrawNotice(g, CanElevate
-                        ? "Per-process network usage needs administrator rights.\nClick here to restart as administrator."
-                        : "Per-process network usage is not available on this system.");
-                    return;
+                    if (Unavailable)
+                    {
+                        DrawNotice(g, CanElevate
+                            ? "Per-process network usage needs administrator rights.\nClick here to restart as administrator."
+                            : "Per-process network usage is not available on this system.");
+                    }
+                    else
+                    {
+                        DrawAxes(g);
+                        if (n < 2) DrawNotice(g, "Collecting samples…");
+                        else layersShown = true;
+                    }
                 }
-                DrawAxes(g);
-                if (n < 2)
-                {
-                    DrawNotice(g, "Collecting samples…");
-                    return;
-                }
-                // The sample just before the visible span lies left of the plot.
-                g.SetClip(PlotClip);
+            }
+            if (layersShown) RenderStrip();
+        }
+
+        /// <summary>
+        /// Draws the layers onto a transparent strip that reaches as far left of the plot as the display
+        /// can trail the data, so shifting it right while panning never uncovers an empty edge.
+        /// </summary>
+        private void RenderStrip()
+        {
+            stripLeft = (int)Math.Floor(plot.Left - MaxLag * PixelsPerSecond) - 2;
+            int width = (int)Math.Ceiling(plot.Right) - stripLeft + 2;
+            if (strip == null || strip.Width != width || strip.Height != Height)
+            {
+                strip?.Dispose();
+                strip = new Bitmap(width, Height, PixelFormat.Format32bppPArgb);
+            }
+            using (Graphics g = Graphics.FromImage(strip))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TranslateTransform(-stripLeft, 0);
                 DrawLayers(g);
-                g.ResetClip();
             }
         }
 
-        // The plot, with slack above, below and to the right so that outlines on its edge are not cut.
-        private RectangleF PlotClip => RectangleF.FromLTRB(plot.Left, 0, Width, Height);
+        // The plot, with slack above and below so that outlines on its edge are not cut. Left and right
+        // it is exact, since the layers run on past both edges while panning.
+        private RectangleF PlotClip => RectangleF.FromLTRB(plot.Left, 0, plot.Right, Height);
 
         private void DrawNotice(Graphics g, string text)
         {
@@ -600,27 +706,36 @@ namespace ProcessStreamgraph
                 g.Clear(theme.Surface);
                 return;
             }
-            g.DrawImageUnscaled(cache, 0, 0);
-            if (!HasPlot) return;
+            // Only the invalid part of the cached heading and axes; while panning that is just the plot.
+            Rectangle clip = Rectangle.Intersect(e.ClipRectangle, new Rectangle(0, 0, cache.Width, cache.Height));
+            g.DrawImage(cache, clip, clip, GraphicsUnit.Pixel);
+            if (!HasPlot || strip == null) return;
 
+            // Whole-pixel shifts keep the strip crisp; the layer coordinates follow with the same offset.
+            GraphicsState plain = g.Save();
+            g.SetClip(PlotClip);
+            g.DrawImageUnscaled(strip, stripLeft + pan, 0);
+            g.TranslateTransform(pan, 0);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
             int selectedLayer = IndexOf(selected);
             if (selectedLayer >= 0)
                 OutlineLayer(g, selectedLayer, false);
-
             int hoverLayer = IndexOf(hoverProcess);
+            if (hoverLayer >= 0)
+                OutlineLayer(g, hoverLayer, true);
+            g.Restore(plain);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             if (hoverLayer < 0) return;
 
-            float x = (float)Math.Round(Math.Max(X(hoverSample), plot.Left));
+            float x = (float)Math.Round(Math.Min(Math.Max(X(hoverSample) + pan, plot.Left), plot.Right));
             using (var crosshair = new Pen(Color.FromArgb(110, theme.PrimaryInk), 1))
             {
                 g.SmoothingMode = SmoothingMode.None;
                 g.DrawLine(crosshair, x, plot.Top, x, plot.Bottom);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
             }
-            OutlineLayer(g, hoverLayer, true);
             DrawTooltip(g, layers[hoverLayer].Process);
         }
 
@@ -631,7 +746,6 @@ namespace ProcessStreamgraph
             {
                 if (path.PointCount == 0) return;
                 GraphicsState state = g.Save();
-                g.SetClip(PlotClip);
                 if (hover)
                 {
                     using (var wash = new SolidBrush(Color.FromArgb(80, Color.White)))
@@ -661,7 +775,7 @@ namespace ProcessStreamgraph
             long sample = firstSample + hoverSample;
             string value = Format.Value(metric, process.Value(metric, sample));
             string when = "  at " + monitor.SampleTime(sample).ToString("T");
-            string detail = "PID " + process.Pid;
+            string detail = (process.DisplayName != process.Name ? process.Name + "  ·  " : "") + "PID " + process.Pid;
             DateTime? started = process.StartTime;
             if (started.HasValue) detail += "  ·  started " + started.Value.ToString(started.Value.Date == DateTime.Today ? "T" : "g");
             if (!process.Alive) detail += "  ·  exited";
@@ -669,7 +783,11 @@ namespace ProcessStreamgraph
             Image icon = hoverIcon;
             float iconSize = 32 * s, pad = 10 * s, gap = 10 * s, key = 4 * s;
             float lineHeight = Font.GetHeight(g) + 2 * s;
-            SizeF nameSize = g.MeasureString(process.Name, BoldFont);
+            // What the process is for, beside its name, to tell it from siblings running the same program.
+            string about = process.Details.Length == 0 ? "" : "  " + (process.Details.Length <= 60 ? process.Details : process.Details.Substring(0, 59) + "…");
+            SizeF nameSize = g.MeasureString(process.DisplayName, BoldFont);
+            SizeF aboutSize = g.MeasureString(about, Font);
+            nameSize.Width += about.Length == 0 ? 0 : aboutSize.Width - 4 * s;
             SizeF valueSize = g.MeasureString(value, BoldFont);
             SizeF whenSize = g.MeasureString(when, Font);
             SizeF detailSize = g.MeasureString(detail, Font);
@@ -712,7 +830,9 @@ namespace ProcessStreamgraph
 
                 float textLeft = left + key + pad + iconSize + gap;
                 float textTop = top + (height - lineHeight * 3) / 2;
-                g.DrawString(process.Name, BoldFont, primary, textLeft, textTop);
+                g.DrawString(process.DisplayName, BoldFont, primary, textLeft, textTop);
+                if (about.Length > 0)
+                    g.DrawString(about, Font, secondary, textLeft + nameSize.Width - aboutSize.Width, textTop);
                 g.DrawString(value, BoldFont, primary, textLeft, textTop + lineHeight);
                 g.DrawString(when, Font, secondary, textLeft + valueSize.Width - 4 * s, textTop + lineHeight);
                 g.DrawString(detail, Font, secondary, textLeft, textTop + lineHeight * 2);

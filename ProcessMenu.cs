@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 
 namespace ProcessStreamgraph
@@ -12,14 +14,20 @@ namespace ProcessStreamgraph
     {
         private readonly ProcessMonitor monitor;
         private readonly IWin32Window owner;
-        private readonly ToolStripMenuItem header, bringToFront, endTask, openLocation, properties, copyCommandLine;
+        private readonly Control fontSource;
+        private readonly ToolStripMenuItem header, bringToFront, endTask, openLocation, properties, safetyReport, connections;
+        private readonly ToolStripMenuItem copyValue, copyRow;
+        private readonly ToolStripSeparator copySeparator;
+        private List<KeyValuePair<string, string>> cells;
         private ProcInfo target;
         private IntPtr targetWindow;
 
-        public ProcessMenu(ProcessMonitor monitor, IWin32Window owner)
+        /// <param name="fontSource">The control whose font, and so text size, the menu matches.</param>
+        public ProcessMenu(ProcessMonitor monitor, IWin32Window owner, Control fontSource)
         {
             this.monitor = monitor;
             this.owner = owner;
+            this.fontSource = fontSource;
             ShowImageMargin = false;
 
             header = new ToolStripMenuItem { Enabled = false };
@@ -27,14 +35,29 @@ namespace ProcessStreamgraph
             endTask = new ToolStripMenuItem("End Task", null, (s, e) => EndTask());
             openLocation = new ToolStripMenuItem("Open File Location", null, (s, e) => Report(ProcessActions.OpenFileLocation(target.Path)));
             properties = new ToolStripMenuItem("Properties", null, (s, e) => Report(ProcessActions.ShowProperties(owner.Handle, target.Path)));
-            // The Arguments column has room for only the start of a long command line.
-            copyCommandLine = new ToolStripMenuItem("Copy Command Line", null, (s, e) => Clipboard.SetText(target.CommandLine));
+            safetyReport = new ToolStripMenuItem("Safety Report…", null, (s, e) => SafetyReportRequested?.Invoke(target));
+            connections = new ToolStripMenuItem("Connections…", null, (s, e) => ConnectionsRequested?.Invoke(target));
+            copyValue = new ToolStripMenuItem("Copy Value");
+            copyValue.Click += (s, e) => CopyText(copyValue.Tag as string);
+            copyRow = new ToolStripMenuItem("Copy Row", null, (s, e) => CopyText(CellMenu.RowText(cells)));
+            copySeparator = new ToolStripSeparator();
             Items.AddRange(new ToolStripItem[]
             {
-                header, new ToolStripSeparator(), bringToFront, endTask, new ToolStripSeparator(),
-                openLocation, properties, copyCommandLine
+                header, new ToolStripSeparator(), copyValue, copyRow, copySeparator, bringToFront, endTask, new ToolStripSeparator(),
+                openLocation, properties, new ToolStripSeparator(), connections, safetyReport
             });
         }
+
+        private static void CopyText(string text)
+        {
+            if (!string.IsNullOrEmpty(text)) Clipboard.SetText(text);
+        }
+
+        /// <summary>Raised when the Safety Report item is chosen.</summary>
+        public event Action<ProcInfo> SafetyReportRequested;
+
+        /// <summary>Raised when the Connections item is chosen.</summary>
+        public event Action<ProcInfo> ConnectionsRequested;
 
         public Theme Theme
         {
@@ -47,16 +70,27 @@ namespace ProcessStreamgraph
             }
         }
 
-        public void Show(ProcInfo process, Point screenLocation)
+        /// <summary>Shows the menu for a process, with no cell values to copy.</summary>
+        public void Show(ProcInfo process, Point screenLocation) => Show(process, screenLocation, null, -1);
+
+        /// <param name="cells">The row's column titles and values, to copy from; null when there is no row.</param>
+        /// <param name="clicked">Index into cells of the one right-clicked, offered first; -1 for none.</param>
+        public void Show(ProcInfo process, Point screenLocation, List<KeyValuePair<string, string>> cells, int clicked)
         {
+            this.cells = cells;
             target = process;
             targetWindow = process.Alive ? FindWindow(process) : IntPtr.Zero;
-            header.Text = $"{process.Name}  (PID {process.Pid})" + (process.Alive ? "" : "  ·  exited");
+            header.Text = (process.DisplayName == process.Name ? process.Name : $"{process.DisplayName}  ·  {process.Name}") +
+                          $"  (PID {process.Pid})" + (process.Alive ? "" : "  ·  exited");
             bringToFront.Enabled = targetWindow != IntPtr.Zero;
             bringToFront.Text = process.Alive && targetWindow == IntPtr.Zero ? "Bring to Front  (no window)" : "Bring to Front";
             endTask.Enabled = process.Alive && process.Pid != 0;
             openLocation.Enabled = properties.Enabled = !string.IsNullOrEmpty(process.Path);
-            copyCommandLine.Enabled = !string.IsNullOrEmpty(process.CommandLine);
+            safetyReport.Enabled = process.Report != null;
+            // Menus otherwise take the system menu font, which comes out larger than the table's.
+            if (!Equals(Font, fontSource.Font)) Font = fontSource.Font;
+            CellMenu.Fill(copyValue, cells, clicked);
+            copyRow.Visible = copySeparator.Visible = cells != null;
             Show(screenLocation);
         }
 
@@ -81,7 +115,7 @@ namespace ProcessStreamgraph
         private void EndTask()
         {
             DialogResult answer = MessageBox.Show(owner,
-                $"End {target.Name} (PID {target.Pid})?\n\nAny unsaved data in it will be lost.", "End Task",
+                $"End {target.DisplayName} ({target.Name}, PID {target.Pid})?\n\nAny unsaved data in it will be lost.", "End Task",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (answer == DialogResult.Yes) Report(ProcessActions.EndTask(target));
         }
@@ -91,6 +125,26 @@ namespace ProcessStreamgraph
             if (error != null)
                 MessageBox.Show(owner, error, "Process Streamgraph", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    /// <summary>The items of a right-click menu that copy a table's cell values.</summary>
+    internal static class CellMenu
+    {
+        /// <summary>
+        /// Sets up Copy Value to copy the cell clicked, whose value it keeps in its Tag; it is hidden when
+        /// no cell was clicked, as when the menu comes from the keyboard.
+        /// </summary>
+        public static void Fill(ToolStripMenuItem copyValue, List<KeyValuePair<string, string>> cells, int clicked)
+        {
+            copyValue.Visible = cells != null && clicked >= 0 && clicked < cells.Count;
+            string value = cells != null && clicked >= 0 && clicked < cells.Count ? cells[clicked].Value : "";
+            copyValue.Enabled = value.Length > 0;
+            copyValue.Tag = value;
+        }
+
+        /// <summary>A row's values separated by tabs, ready to paste into a spreadsheet.</summary>
+        public static string RowText(List<KeyValuePair<string, string>> cells) =>
+            cells == null ? null : string.Join("\t", cells.Select(c => c.Value.Replace('\t', ' ').Replace("\r", "").Replace('\n', ' ')));
     }
 
     /// <summary>Menu renderer for the dark theme, which the stock renderers lack.</summary>
@@ -172,16 +226,42 @@ namespace ProcessStreamgraph
             return windows;
         }
 
-        /// <summary>Updates each running process's window status: none, running, or not responding.</summary>
+        /// <summary>
+        /// Updates each running process's window status (none, running, or not responding) and the
+        /// title of its frontmost window.
+        /// </summary>
         public static void UpdateWindowStates(IReadOnlyList<ProcInfo> processes)
         {
             Dictionary<int, IntPtr> windows = MainWindows();
+            var title = new StringBuilder(256);
+            // The Explorer process that draws the desktop and taskbar has no ordinary window to name it.
+            NativeMethods.GetWindowThreadProcessId(NativeMethods.GetShellWindow(), out uint shellPid);
             foreach (ProcInfo process in processes)
             {
+                if (process.Pid == shellPid && process.Alive && process.Role == null)
+                {
+                    process.Role = "Windows shell: desktop and taskbar";
+                    process.RefreshDetails();
+                }
+                string text = null;
                 if (!process.Alive || !windows.TryGetValue(process.Pid, out IntPtr window))
+                {
                     process.WindowState = WindowState.None;
+                }
                 else
+                {
                     process.WindowState = NativeMethods.IsHungAppWindow(window) ? WindowState.NotResponding : WindowState.Running;
+                    // Reads the text Windows keeps for the window, without asking its process, so a hung
+                    // program cannot hold this up.
+                    title.Length = 0;
+                    if (NativeMethods.GetWindowText(window, title, title.Capacity) > 0) text = title.ToString();
+                }
+                // Exited processes keep the last title they had.
+                if (process.Alive && text != process.WindowTitle)
+                {
+                    process.WindowTitle = text;
+                    process.RefreshDetails();
+                }
             }
         }
 

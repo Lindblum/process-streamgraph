@@ -1,15 +1,20 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace ProcessStreamgraph
 {
     /// <summary>
-    /// Counts bytes sent and received per process from the Microsoft-Windows-Kernel-Network trace
-    /// events (ETW), the only source Windows offers for per-process network traffic. Starting the
-    /// trace session needs administrator rights or membership of the Performance Log Users group.
+    /// Counts bytes sent and received per process, and per remote endpoint, from the
+    /// Microsoft-Windows-Kernel-Network trace events (ETW), the only source Windows offers for
+    /// per-process network traffic; that provider needs administrator rights. The same session also
+    /// listens to the DNS client's events, which say which names each process looked up and the
+    /// addresses that came back; those need only membership of the Performance Log Users group.
     /// </summary>
     internal sealed class NetworkMonitor : IDisposable
     {
@@ -31,9 +36,12 @@ namespace ProcessStreamgraph
         private const ulong INVALID_PROCESSTRACE_HANDLE = ulong.MaxValue;
 
         private static readonly Guid KernelNetworkProvider = new Guid("7DD42A49-5329-4832-8DFD-43D979153A88");
+        private static readonly Guid DnsClientProvider = new Guid("1C95126E-7EEA-49A9-A3FE-A378B03DDB4D");
+        private const short DnsQueryCompleted = 3008;
 
         // Data sent and received: TCP over IPv4 (10, 11) and IPv6 (26, 27), UDP over IPv4 (42, 43) and
-        // IPv6 (58, 59). The provider's other events are connection bookkeeping.
+        // IPv6 (58, 59). The provider's other events are connection bookkeeping. Each starts with the
+        // process ID, the byte count, the destination and source addresses, then their ports.
         private static readonly short[] DataEvents = { 10, 11, 26, 27, 42, 43, 58, 59 };
 
         [StructLayout(LayoutKind.Sequential)]
@@ -81,7 +89,7 @@ namespace ProcessStreamgraph
         }
 
         // Offsets into EVENT_RECORD on 64-bit Windows.
-        private const int RecordEventId = 40, RecordUserDataLength = 86, RecordUserData = 96;
+        private const int RecordProcessId = 12, RecordProviderId = 24, RecordEventId = 40, RecordUserDataLength = 86, RecordUserData = 96;
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate void EventRecordCallback(IntPtr eventRecord);
@@ -112,11 +120,40 @@ namespace ProcessStreamgraph
         private readonly EventRecordCallback callback;     // held so the delegate outlives the native call
         private Dictionary<int, long> pending = new Dictionary<int, long>();
         private Dictionary<int, long> spare = new Dictionary<int, long>();
+        private Dictionary<Flow, FlowBytes> pendingFlows = new Dictionary<Flow, FlowBytes>();
+        private Dictionary<Flow, FlowBytes> spareFlows = new Dictionary<Flow, FlowBytes>();
         private ulong traceHandle = INVALID_PROCESSTRACE_HANDLE;
         private bool sessionStarted;
 
+        // This computer's own addresses, to tell which end of a connection is the far one.
+        private volatile HashSet<IpAddr> localAddresses = LocalAddresses();
+
+        // The name each address was last looked up under: by process and address, then by address alone.
+        private readonly object namesGate = new object();
+        private readonly Dictionary<KeyValuePair<int, IpAddr>, string> namesByProcess = new Dictionary<KeyValuePair<int, IpAddr>, string>();
+        private readonly Dictionary<IpAddr, string> names = new Dictionary<IpAddr, string>();
+        private const int MaxNames = 100000;
+
+        /// <summary>One process's traffic with one remote endpoint.</summary>
+        public struct Flow : IEquatable<Flow>
+        {
+            public int Pid;
+            public Endpoint Remote;
+            public bool Equals(Flow other) => Pid == other.Pid && Remote.Equals(other.Remote);
+            public override bool Equals(object obj) => obj is Flow other && Equals(other);
+            public override int GetHashCode() => Pid * 7919 ^ Remote.GetHashCode();
+        }
+
+        public sealed class FlowBytes
+        {
+            public long Sent, Received;
+        }
+
         /// <summary>True when the trace session is running and traffic is being counted.</summary>
         public bool Available { get; }
+
+        /// <summary>True when DNS lookups are being followed, so addresses can be named.</summary>
+        public bool NamesAvailable { get; }
 
         /// <summary>True when the session could not be started for lack of rights.</summary>
         public bool AccessDenied { get; }
@@ -127,20 +164,25 @@ namespace ProcessStreamgraph
             if (!Environment.Is64BitProcess) return;
 
             StopStaleSessions();
-            uint status = StartSession(out ulong session);
+            uint status = StartSession(out ulong session), dnsStatus = status;
             if (status == ERROR_SUCCESS)
             {
                 sessionStarted = true;
                 Guid provider = KernelNetworkProvider;
                 status = EnableTraceEx2(session, ref provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
                     TRACE_LEVEL_INFORMATION, 0, 0, 0, IntPtr.Zero);
+                Guid dns = DnsClientProvider;
+                dnsStatus = EnableTraceEx2(session, ref dns, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                    TRACE_LEVEL_INFORMATION, 0, 0, 0, IntPtr.Zero);
             }
             AccessDenied = status == ERROR_ACCESS_DENIED;
-            if (status != ERROR_SUCCESS)
+            // Without the rights for traffic, the session still serves for following DNS lookups.
+            if (status != ERROR_SUCCESS && dnsStatus != ERROR_SUCCESS)
             {
                 Dispose();
                 return;
             }
+            NetworkChange.NetworkAddressChanged += OnAddressChanged;
 
             IntPtr name = Marshal.StringToHGlobalUni(SessionName);
             try
@@ -169,7 +211,48 @@ namespace ProcessStreamgraph
                 IsBackground = true,
                 Name = "Network trace"
             }.Start();
-            Available = true;
+            Available = status == ERROR_SUCCESS;
+            NamesAvailable = dnsStatus == ERROR_SUCCESS;
+        }
+
+        private void OnAddressChanged(object sender, EventArgs e) => localAddresses = LocalAddresses();
+
+        private static HashSet<IpAddr> LocalAddresses()
+        {
+            var set = new HashSet<IpAddr> { IpAddr.From(IPAddress.Loopback), IpAddr.From(IPAddress.IPv6Loopback) };
+            try
+            {
+                foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
+                    foreach (UnicastIPAddressInformation address in adapter.GetIPProperties().UnicastAddresses)
+                        set.Add(IpAddr.From(address.Address));
+            }
+            catch (NetworkInformationException)
+            {
+            }
+            return set;
+        }
+
+        /// <summary>Bytes sent and received per process and remote endpoint since the previous call.</summary>
+        public Dictionary<Flow, FlowBytes> DrainFlows()
+        {
+            lock (gate)
+            {
+                Dictionary<Flow, FlowBytes> result = pendingFlows;
+                spareFlows.Clear();
+                pendingFlows = spareFlows;
+                spareFlows = result;
+                return result;
+            }
+        }
+
+        /// <summary>The domain a process (or failing that, any process) last looked up and got this address for.</summary>
+        public string NameFor(int pid, IpAddr address)
+        {
+            lock (namesGate)
+            {
+                if (namesByProcess.TryGetValue(new KeyValuePair<int, IpAddr>(pid, address), out string name)) return name;
+                return names.TryGetValue(address, out name) ? name : null;
+            }
         }
 
         /// <summary>Bytes sent plus received per process ID since the previous call.</summary>
@@ -185,19 +268,91 @@ namespace ProcessStreamgraph
             }
         }
 
+        private static readonly long DnsProviderLow = BitConverter.ToInt64(DnsClientProvider.ToByteArray(), 0);
+
         private void OnEvent(IntPtr record)
         {
-            if (Array.IndexOf(DataEvents, Marshal.ReadInt16(record, RecordEventId)) < 0) return;
-            if ((ushort)Marshal.ReadInt16(record, RecordUserDataLength) < 8) return;
+            short id = Marshal.ReadInt16(record, RecordEventId);
+            int length = (ushort)Marshal.ReadInt16(record, RecordUserDataLength);
+            IntPtr data = Marshal.ReadIntPtr(record, RecordUserData);
+            if (id == DnsQueryCompleted)
+            {
+                if (Marshal.ReadInt64(record, RecordProviderId) == DnsProviderLow)
+                    OnDnsAnswer(Marshal.ReadInt32(record, RecordProcessId), data, length);
+                return;
+            }
+            if (Array.IndexOf(DataEvents, id) < 0) return;
+            if (length < 8) return;
 
             // All of these events start with the owning process ID followed by the byte count.
-            IntPtr data = Marshal.ReadIntPtr(record, RecordUserData);
             int pid = Marshal.ReadInt32(data, 0);
             uint size = (uint)Marshal.ReadInt32(data, 4);
+            bool v6 = id == 26 || id == 27 || id == 58 || id == 59;
+            bool sent = id == 10 || id == 26 || id == 42 || id == 58;
+            bool udp = id >= 42;
+            bool hasEnds = length >= (v6 ? 44 : 20);
+            var flow = new Flow { Pid = pid };
+            if (hasEnds)
+            {
+                IpAddr destination, source;
+                int ports;
+                if (v6)
+                {
+                    destination = IpAddr.V6Raw((ulong)Marshal.ReadInt64(data, 8), (ulong)Marshal.ReadInt64(data, 16));
+                    source = IpAddr.V6Raw((ulong)Marshal.ReadInt64(data, 24), (ulong)Marshal.ReadInt64(data, 32));
+                    ports = 40;
+                }
+                else
+                {
+                    destination = IpAddr.V4((uint)Marshal.ReadInt32(data, 8));
+                    source = IpAddr.V4((uint)Marshal.ReadInt32(data, 12));
+                    ports = 16;
+                }
+                // The far end is the destination, unless that is one of this computer's own addresses
+                // and the source is not. Ports are in network byte order.
+                HashSet<IpAddr> local = localAddresses;
+                bool farIsSource = local.Contains(destination) && !local.Contains(source);
+                int portOffset = ports + (farIsSource ? 2 : 0);
+                ushort port = (ushort)((Marshal.ReadByte(data, portOffset) << 8) | Marshal.ReadByte(data, portOffset + 1));
+                flow.Remote = new Endpoint(farIsSource ? source : destination, port, udp);
+            }
             lock (gate)
             {
                 pending.TryGetValue(pid, out long bytes);
                 pending[pid] = bytes + size;
+                if (!hasEnds) return;
+                if (!pendingFlows.TryGetValue(flow, out FlowBytes counts)) pendingFlows[flow] = counts = new FlowBytes();
+                if (sent) counts.Sent += size;
+                else counts.Received += size;
+            }
+        }
+
+        // DNS query completed: the name, then the record type (4 bytes), options (8) and status (4),
+        // then the answers as text, such as "::ffff:104.20.23.154;::ffff:172.66.147.243;".
+        private void OnDnsAnswer(int pid, IntPtr data, int length)
+        {
+            if (length < 20 || pid == OwnPid) return;
+            string name = Marshal.PtrToStringUni(data);
+            int offset = (name.Length + 1) * 2;
+            if (name.Length == 0 || offset + 16 + 2 > length) return;
+            if (Marshal.ReadInt32(data, offset + 12) != 0) return;     // the lookup failed
+            string answers = Marshal.PtrToStringUni(IntPtr.Add(data, offset + 16));
+            if (string.IsNullOrEmpty(answers)) return;
+            lock (namesGate)
+            {
+                if (names.Count > MaxNames)
+                {
+                    names.Clear();
+                    namesByProcess.Clear();
+                }
+                foreach (string answer in answers.Split(';'))
+                {
+                    // Other kinds of answer, such as "type: 5 alias.example.net" for an alias, are skipped.
+                    if (!IPAddress.TryParse(answer.Trim(), out IPAddress address)) continue;
+                    IpAddr key = IpAddr.From(address);
+                    names[key] = name;
+                    namesByProcess[new KeyValuePair<int, IpAddr>(pid, key)] = name;
+                }
             }
         }
 
@@ -302,6 +457,7 @@ namespace ProcessStreamgraph
 
         public void Dispose()
         {
+            NetworkChange.NetworkAddressChanged -= OnAddressChanged;
             if (!sessionStarted) return;
             sessionStarted = false;
             StopSession(SessionName);

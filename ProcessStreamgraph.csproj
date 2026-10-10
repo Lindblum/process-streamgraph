@@ -7,6 +7,8 @@
     <RootNamespace>ProcessStreamgraph</RootNamespace>
     <AssemblyName>ProcessStreamgraph</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Drawn by tools\MakeIcon.ps1. -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
@@ -14,6 +16,16 @@
   <ItemGroup>
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="AppRatings.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Also embedded whole, so the window can pick each size from it rather than scale one. -->
+    <EmbeddedResource Include="app.ico" LogicalName="ProcessStreamgraph.app.ico" />
   </ItemGroup>
 
 </Project>

@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace ProcessStreamgraph
 {
@@ -18,20 +19,31 @@ namespace ProcessStreamgraph
         private readonly Panel graphFiller;
         private readonly SplitContainer split;
         private readonly Timer timer;
+        private readonly Timer animation;      // pans the graphs between samples
         private Control toolbar;
         private ComboBox[] dropdowns;
         private NumericUpDown refreshSeconds;
+        private Button safetySources;
         // Time-axis spans, in seconds, that the mouse wheel steps through over the graphs.
         private static readonly int[] ZoomSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
         private int zoom = ZoomSpans.Length - 1;
         private int wheelRemainder;
         private readonly ProcessMenu processMenu;
+        private readonly SafetyService safety;
+        private Theme theme;
+        private bool followSystemTheme = true;     // the System default choice: light or dark as Windows is set
+        private bool graphsStale;  // samples were taken while minimized and not yet drawn
         private bool arranging;     // true while nodes are being reordered, when selection events are noise
 
         public MainForm()
         {
             Text = "Process Streamgraph";
+            using (var stream = typeof(MainForm).Assembly.GetManifestResourceStream("ProcessStreamgraph.app.ico"))
+                if (stream != null) Icon = new Icon(stream);
             Font = SystemFonts.MessageBoxFont;
+            // Created here rather than with the fields: by now the form exists, so the UI thread's
+            // synchronization context is installed for the service to post its results back through.
+            safety = new SafetyService();
             // Sizes below are in 96-DPI units; OnLoad scales them for the monitor the window opens on.
             AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(1880, 900);
@@ -49,12 +61,17 @@ namespace ProcessStreamgraph
                 int target = split.SplitterDistance + delta * DeviceDpi / 96;
                 split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min(target, MaxTreePane));
             };
-            processMenu = new ProcessMenu(monitor, this);
+            processMenu = new ProcessMenu(monitor, this, tree);
+            processMenu.SafetyReportRequested += ShowSafetyReport;
+            processMenu.ConnectionsRequested += ShowConnections;
+            // Safety results arrive in bursts; one pass over the visible rows covers each burst.
+            safety.Updated += tree.QueueRefreshChangedCells;
             tree.MouseUp += (s, e) =>
             {
                 if (e.Button != MouseButtons.Right || !(tree.GetNodeAt(e.Location) is TreeNode node)) return;
                 tree.SelectedNode = node;
-                processMenu.Show((ProcInfo)node.Tag, tree.PointToScreen(e.Location));
+                var process = (ProcInfo)node.Tag;
+                processMenu.Show(process, tree.PointToScreen(e.Location), tree.CellsOf(process), tree.ShownIndexAt(e.X));
             };
             tree.KeyDown += (s, e) =>
             {
@@ -62,7 +79,8 @@ namespace ProcessStreamgraph
                 bool menuKey = e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift);
                 if (!menuKey || tree.SelectedNode == null) return;
                 Rectangle row = tree.SelectedNode.Bounds;
-                processMenu.Show((ProcInfo)tree.SelectedNode.Tag, tree.PointToScreen(new Point(row.Left, row.Bottom)));
+                var process = (ProcInfo)tree.SelectedNode.Tag;
+                processMenu.Show(process, tree.PointToScreen(new Point(row.Left, row.Bottom)), tree.CellsOf(process), -1);
                 e.Handled = true;
             };
 
@@ -79,7 +97,7 @@ namespace ProcessStreamgraph
                     Margin = new Padding(0, i == 0 ? 0 : 1, 0, 0)
                 };
                 graph.ProcessClicked += SelectInTree;
-                graph.ProcessMenuRequested += processMenu.Show;
+                graph.ProcessMenuRequested += (process, location) => processMenu.Show(process, location, tree.CellsOf(process), -1);
                 graph.ElevationRequested += RestartElevated;
                 graph.CollapsedChanged += LayoutGraphs;
                 streamGraphs[i] = graph;
@@ -104,6 +122,13 @@ namespace ProcessStreamgraph
 
             timer = new Timer { Interval = 1000 };
             timer.Tick += (s, e) => TakeSample();
+            // About the display's refresh rate; the graphs only repaint when they have moved a pixel.
+            animation = new Timer { Interval = 15 };
+            animation.Tick += (s, e) =>
+            {
+                if (WindowState == FormWindowState.Minimized) return;
+                foreach (StreamGraphControl graph in streamGraphs) graph.Animate();
+            };
             Application.AddMessageFilter(this);
         }
 
@@ -131,8 +156,8 @@ namespace ProcessStreamgraph
             return true;
         }
 
-        // Default width of the tree pane, in 96-DPI units: the shown columns plus room for process names.
-        private int TreeWidth => tree.ShownColumnsWidth + 250;
+        // Default width of the tree pane, in 96-DPI units: the shown columns plus the scroll bar.
+        private int TreeWidth => tree.ShownColumnsWidth + 24;
 
         // The tree pane never takes more than this, so the graphs keep a usable width.
         private int MaxTreePane => split.Width * 3 / 5;
@@ -204,6 +229,7 @@ namespace ProcessStreamgraph
 
             TakeSample();
             timer.Start();
+            animation.Start();
         }
 
         private Control BuildToolbar()
@@ -231,11 +257,16 @@ namespace ProcessStreamgraph
                 foreach (StreamGraphControl graph in streamGraphs) graph.Reverse = reverse.Checked;
             };
 
-            Theme initial = Theme.SystemDefault;
-            var themes = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
+            var themes = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
+            themes.Items.Add("System default");
             foreach (Theme theme in Theme.All) themes.Items.Add(theme.Name);
-            themes.SelectedIndex = Array.IndexOf(Theme.All, initial);
-            themes.SelectedIndexChanged += (s, e) => ApplyTheme(Theme.All[themes.SelectedIndex]);
+            themes.SelectedIndex = 0;
+            themes.SelectedIndexChanged += (s, e) =>
+            {
+                followSystemTheme = themes.SelectedIndex == 0;
+                ApplyTheme(followSystemTheme ? Theme.SystemDefault : Theme.All[themes.SelectedIndex - 1]);
+            };
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
             bar.Controls.Add(new Label { Text = "Sort layers by:", AutoSize = true, Anchor = AnchorStyles.Left });
             bar.Controls.Add(sort);
@@ -254,16 +285,33 @@ namespace ProcessStreamgraph
                 TextAlign = HorizontalAlignment.Right,
                 Margin = new Padding(3, 3, 0, 3)
             };
-            refreshSeconds.ValueChanged += (s, e) => timer.Interval = (int)(refreshSeconds.Value * 1000);
+            refreshSeconds.ValueChanged += (s, e) =>
+            {
+                timer.Interval = (int)(refreshSeconds.Value * 1000);
+                foreach (StreamGraphControl graph in streamGraphs) graph.RefreshSeconds = (double)refreshSeconds.Value;
+            };
             bar.Controls.Add(new Label { Text = "Refresh every:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(21, 0, 3, 0) });
             bar.Controls.Add(refreshSeconds);
             bar.Controls.Add(new Label { Text = "seconds", AutoSize = true, Anchor = AnchorStyles.Left });
+
+            safetySources = new Button
+            {
+                Text = "Safety Sources…",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Anchor = AnchorStyles.Left,
+                Padding = new Padding(6, 0, 6, 0),
+                Margin = new Padding(21, 0, 3, 0)
+            };
+            safetySources.Click += (s, e) => ShowSafetySources();
+            bar.Controls.Add(safetySources);
             dropdowns = new[] { sort, themes };
             return bar;
         }
 
         private void ApplyTheme(Theme theme)
         {
+            this.theme = theme;
             BackColor = theme.Control;
             ForeColor = theme.ControlText;
             toolbar.BackColor = theme.Control;
@@ -277,6 +325,10 @@ namespace ProcessStreamgraph
             }
             refreshSeconds.BackColor = theme.IsDark ? theme.InactiveSelection : theme.Window;
             refreshSeconds.ForeColor = theme.WindowText;
+            safetySources.FlatStyle = theme.IsDark ? FlatStyle.Flat : FlatStyle.Standard;
+            safetySources.BackColor = theme.IsDark ? theme.InactiveSelection : SystemColors.Control;
+            safetySources.ForeColor = theme.ControlText;
+            if (theme.IsDark) safetySources.FlatAppearance.BorderColor = theme.Border;
             split.BackColor = theme.Control;
             graphs.BackColor = theme.Border;
             graphFiller.BackColor = theme.Surface;
@@ -289,9 +341,31 @@ namespace ProcessStreamgraph
         private void TakeSample()
         {
             monitor.Sample();
+            // While minimized nothing is drawn: the history keeps filling, and the tree keeps track of
+            // which processes exist, but the graphs wait to be rebuilt until the window is back.
+            if (WindowState == FormWindowState.Minimized)
+            {
+                SyncTree();
+                graphsStale = true;
+                return;
+            }
             ProcessActions.UpdateWindowStates(monitor.Processes);
+            ServiceDirectory.Update(monitor);
+            WorkingFolders.Update(monitor);
             SyncTree();
             foreach (StreamGraphControl graph in streamGraphs) graph.Rebuild();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (graphsStale && WindowState != FormWindowState.Minimized)
+            {
+                graphsStale = false;
+                ProcessActions.UpdateWindowStates(monitor.Processes);
+                foreach (StreamGraphControl graph in streamGraphs) graph.Rebuild();
+                tree.Invalidate();
+            }
         }
 
         private void SyncTree()
@@ -303,7 +377,11 @@ namespace ProcessStreamgraph
             List<ProcInfo> added = monitor.Added, removed = monitor.Removed;
             if (added.Count > 0 || removed.Count > 0)
             {
-                tree.BeginUpdate();
+                // Suspending redraw only pays for itself on big batches, such as the first sample:
+                // re-enabling it makes the control re-measure every row, which takes most of a second
+                // with a few hundred processes, while adding or removing a row as it is costs about 1 ms.
+                bool bulk = added.Count + removed.Count > 20;
+                if (bulk) tree.BeginUpdate();
                 foreach (ProcInfo p in removed)
                 {
                     TreeNode node = p.Node;
@@ -327,15 +405,18 @@ namespace ProcessStreamgraph
                 foreach (ProcInfo p in added)
                 {
                     int image = icons.GetSmallIndex(p.Path);
-                    p.Node = new TreeNode(p.Name, image, image) { Tag = p };
+                    p.Report = safety.ReportFor(p);
+                    // The row's text is what typing a name in the tree jumps to; the cells are drawn separately.
+                    p.Node = new TreeNode(p.DisplayName, image, image) { Tag = p };
                     PlaceNode(p);
                 }
-                tree.EndUpdate();
+                if (bulk) tree.EndUpdate();
             }
 
             if (tree.SortColumn.HasValue) SortList();
             if (top != null && top.TreeView == tree && tree.TopNode != top) tree.TopNode = top;
-            tree.Invalidate();
+            // Only the cells whose text changed; repainting every row each sample was most of the cost.
+            tree.RefreshChangedCells();
         }
 
         /// <summary>Adds a process's node under its parent in tree view, or at the top level in a sorted list.</summary>
@@ -400,7 +481,7 @@ namespace ProcessStreamgraph
                 if (row.Tag == process) continue;
                 row.Tag = process;
                 process.Node = row;
-                if (row.Text != process.Name) row.Text = process.Name;
+                if (row.Text != process.DisplayName) row.Text = process.DisplayName;
                 int image = icons.GetSmallIndex(process.Path);
                 if (row.ImageIndex != image) row.ImageIndex = row.SelectedImageIndex = image;
             }
@@ -411,6 +492,37 @@ namespace ProcessStreamgraph
                 arranging = true;
                 tree.SelectedNode = selected.Node;
                 arranging = false;
+            }
+        }
+
+        private void ShowSafetyReport(ProcInfo process)
+        {
+            if (process.Report == null) return;
+            var form = new SafetyReportForm(process.Report, safety, theme, DeviceDpi, tree.Font);
+            form.FormClosed += (s, e) => form.Dispose();
+            form.Show(this);
+        }
+
+        private void ShowConnections(ProcInfo process)
+        {
+            var form = new ConnectionsForm(process, monitor, safety, theme, DeviceDpi, tree.Font, RestartElevated);
+            form.FormClosed += (s, e) => form.Dispose();
+            form.Show(this);
+        }
+
+        private void ShowSafetySources()
+        {
+            using (var form = new SafetySourcesForm(safety.Settings, theme, DeviceDpi, tree.Font))
+            {
+                if (form.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    safety.ApplySettings(form.Result);
+                }
+                catch (Exception e) when (e is System.IO.IOException || e is UnauthorizedAccessException || e is System.Security.Cryptography.CryptographicException)
+                {
+                    MessageBox.Show(this, "Could not save the safety settings: " + e.Message, "Process Streamgraph", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
@@ -432,13 +544,26 @@ namespace ProcessStreamgraph
             tree.Focus();
         }
 
+        // Raised on a system thread when Windows settings change, the light or dark app mode among them.
+        private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            if (e.Category != UserPreferenceCategory.General || !IsHandleCreated) return;
+            BeginInvoke((Action)(() =>
+            {
+                if (followSystemTheme && Theme.SystemDefault != theme) ApplyTheme(Theme.SystemDefault);
+            }));
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
                 Application.RemoveMessageFilter(this);
                 processMenu.Dispose();
+                safety.Dispose();
                 timer.Dispose();
+                animation.Dispose();
                 monitor.Dispose();
                 icons.Dispose();
             }

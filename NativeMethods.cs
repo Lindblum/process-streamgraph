@@ -110,6 +110,9 @@ namespace ProcessStreamgraph
         public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref RECT lParam);
 
         [DllImport("user32.dll")]
+        public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+        [DllImport("user32.dll")]
         public static extern int GetDpiForWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
@@ -137,6 +140,9 @@ namespace ProcessStreamgraph
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int maxCount);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetWindowLong(IntPtr hWnd, int index);
@@ -241,6 +247,50 @@ namespace ProcessStreamgraph
                 CloseHandle(process);
             }
         }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool ReadProcessMemory(IntPtr process, IntPtr address, IntPtr buffer, IntPtr size, out IntPtr read);
+
+        private static IntPtr ReadPointer(IntPtr process, IntPtr address, IntPtr scratch) =>
+            ReadProcessMemory(process, address, scratch, (IntPtr)IntPtr.Size, out _) ? Marshal.ReadIntPtr(scratch) : IntPtr.Zero;
+
+        /// <summary>
+        /// The folder a process is working in, read from its memory, or null when Windows will not let
+        /// this process look. 64-bit only: the offsets below are those of the 64-bit structures.
+        /// </summary>
+        public static string GetCurrentDirectory(int pid)
+        {
+            if (IntPtr.Size != 8) return null;
+            const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, PROCESS_VM_READ = 0x10;
+            const int ProcessBasicInformation = 0;
+            const int PebProcessParameters = 0x20, ParametersCurrentDirectory = 0x38;
+            IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, false, pid);
+            if (process == IntPtr.Zero) return null;
+            IntPtr scratch = Marshal.AllocHGlobal(1024);
+            try
+            {
+                // PROCESS_BASIC_INFORMATION: exit status, then the address of the process environment block.
+                if (NtQueryInformationProcess(process, ProcessBasicInformation, scratch, 48, out _) < 0) return null;
+                IntPtr peb = Marshal.ReadIntPtr(scratch, 8);
+                if (peb == IntPtr.Zero) return null;
+                IntPtr parameters = ReadPointer(process, IntPtr.Add(peb, PebProcessParameters), scratch);
+                if (parameters == IntPtr.Zero) return null;
+                // The current directory is a UNICODE_STRING (and a handle) inside the process parameters.
+                if (!ReadProcessMemory(process, IntPtr.Add(parameters, ParametersCurrentDirectory), scratch, (IntPtr)16, out _)) return null;
+                var path = Marshal.PtrToStructure<UNICODE_STRING>(scratch);
+                if (path.Buffer == IntPtr.Zero || path.Length == 0 || path.Length > 1000) return null;
+                if (!ReadProcessMemory(process, path.Buffer, scratch, (IntPtr)path.Length, out _)) return null;
+                return Marshal.PtrToStringUni(scratch, path.Length / 2);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(scratch);
+                CloseHandle(process);
+            }
+        }
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetShellWindow();
 
         private static List<KeyValuePair<string, string>> deviceMap;
 
