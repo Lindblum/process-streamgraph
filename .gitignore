@@ -1,0 +1,6 @@
+# Claude Code's personal settings for this project
+.claude/settings.local.json
+
+# Visual Studio
+.vs/
+*.user
