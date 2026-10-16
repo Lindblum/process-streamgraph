@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Forms;
 
 namespace ProcessStreamgraph
 {
     internal static class NativeMethods
     {
         public const int SystemProcessInformation = 5;
+        public const int SystemProcessorPerformanceInformation = 8;
         public const int SystemProcessIdInformation = 88;
         public const int STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xC0000004);
 
@@ -19,6 +21,9 @@ namespace ProcessStreamgraph
 
         public const int WM_DPICHANGED = 0x02E0;
         public const int WM_MOUSEWHEEL = 0x020A;
+        public const int WM_MOUSEHWHEEL = 0x020E;
+        public const int WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203;
+        public const int MK_SHIFT = 0x0004;
         public const int TVS_NOHSCROLL = 0x8000;
         public const int TVM_SETEXTENDEDSTYLE = 0x1100 + 44;
         public const int TVS_EX_DOUBLEBUFFER = 0x0004;
@@ -69,6 +74,13 @@ namespace ProcessStreamgraph
             public UIntPtr PagefileUsage;
             public UIntPtr PeakPagefileUsage;
             public UIntPtr PrivatePageCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+        {
+            public long IdleTime, KernelTime, UserTime, DpcTime, InterruptTime;
+            public uint InterruptCount;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -180,13 +192,48 @@ namespace ProcessStreamgraph
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX status);
 
-        /// <summary>Physical memory available to Windows, in bytes.</summary>
-        public static long GetTotalPhysicalMemory()
+        private static MEMORYSTATUSEX GetMemoryStatus()
         {
             var status = new MEMORYSTATUSEX { Length = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
             if (!GlobalMemoryStatusEx(ref status))
                 throw new System.ComponentModel.Win32Exception();
-            return (long)status.TotalPhys;
+            return status;
+        }
+
+        /// <summary>Physical memory available to Windows, in bytes.</summary>
+        public static long GetTotalPhysicalMemory() => (long)GetMemoryStatus().TotalPhys;
+
+        /// <summary>Physical memory in use, in bytes: what Task Manager reports as "In use".</summary>
+        public static long GetMemoryInUse()
+        {
+            MEMORYSTATUSEX status = GetMemoryStatus();
+            return (long)(status.TotalPhys - status.AvailPhys);
+        }
+
+        /// <summary>
+        /// Time all processors have spent on interrupts and deferred procedure calls since boot, in
+        /// 100 ns units, or 0 when it cannot be read. No process is charged for this time.
+        /// </summary>
+        public static long GetInterruptAndDpcTime(int processorCount)
+        {
+            int size = Marshal.SizeOf<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>();
+            IntPtr buffer = Marshal.AllocHGlobal(size * processorCount);
+            try
+            {
+                if (NtQuerySystemInformation(SystemProcessorPerformanceInformation, buffer, size * processorCount, out int returned) < 0)
+                    return 0;
+                long total = 0;
+                for (int i = 0; i < returned / size; i++)
+                {
+                    var info = Marshal.PtrToStructure<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>(IntPtr.Add(buffer, i * size));
+                    total += info.DpcTime + info.InterruptTime;
+                }
+                return total;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
         }
 
         /// <summary>Switches the window's title bar between the light and dark system styles.</summary>
@@ -351,6 +398,41 @@ namespace ProcessStreamgraph
                     return entry.Value + devicePath.Substring(entry.Key.Length);
             }
             return null;
+        }
+    }
+
+    /// <summary>Horizontal scrolling from the mouse: Shift with the ordinary wheel, or a tilting wheel or touchpad.</summary>
+    internal static class HorizontalWheel
+    {
+        /// <summary>
+        /// How far a wheel message asks to scroll right, in pixels (negative for left); 0 when it is not
+        /// a horizontal scroll. As in Explorer and browsers, Shift with the wheel turned down goes right.
+        /// </summary>
+        public static int Pixels(ref Message m, float dpiScale)
+        {
+            int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+            if (m.Msg == NativeMethods.WM_MOUSEWHEEL && (m.WParam.ToInt64() & NativeMethods.MK_SHIFT) != 0) delta = -delta;
+            else if (m.Msg != NativeMethods.WM_MOUSEHWHEEL) return 0;
+            // One notch is 120 units; precision wheels and touchpads send smaller amounts, which scroll less.
+            return (int)Math.Round(delta * 60 * dpiScale / 120);
+        }
+    }
+
+    /// <summary>A list view that scrolls sideways with Shift and the mouse wheel.</summary>
+    internal sealed class WheelListView : ListView
+    {
+        private const int LVM_SCROLL = 0x1014;
+
+        protected override void WndProc(ref Message m)
+        {
+            int pixels = HorizontalWheel.Pixels(ref m, DeviceDpi / 96f);
+            if (pixels != 0)
+            {
+                NativeMethods.SendMessage(Handle, LVM_SCROLL, (IntPtr)pixels, IntPtr.Zero);
+                m.Result = m.Msg == NativeMethods.WM_MOUSEHWHEEL ? (IntPtr)1 : IntPtr.Zero;
+                return;
+            }
+            base.WndProc(ref m);
         }
     }
 }

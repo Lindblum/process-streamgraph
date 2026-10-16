@@ -17,3 +17,7 @@ C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-
 C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.exe.config
 C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.exe
 C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\4ae1f08c-86f4-4c5f-a299-bb242eb0891e\scratchpad\nofix\ProcessStreamgraph.pdb
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\12be7269-4da3-4776-9c88-23fc412c30d8\scratchpad\build\AppRatings.json
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\12be7269-4da3-4776-9c88-23fc412c30d8\scratchpad\build\ProcessStreamgraph.exe.config
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\12be7269-4da3-4776-9c88-23fc412c30d8\scratchpad\build\ProcessStreamgraph.exe
+C:\Users\david\AppData\Local\Temp\claude\C--Users-david-Desktop-Projects-Claude-process-streamgraph\12be7269-4da3-4776-9c88-23fc412c30d8\scratchpad\build\ProcessStreamgraph.pdb

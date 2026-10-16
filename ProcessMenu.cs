@@ -17,7 +17,8 @@ namespace ProcessStreamgraph
         private readonly Control fontSource;
         private readonly ToolStripMenuItem header, bringToFront, endTask, openLocation, properties, safetyReport, connections;
         private readonly ToolStripMenuItem copyValue, copyRow;
-        private readonly ToolStripSeparator copySeparator;
+        private readonly ToolStripSeparator copySeparator, serviceSeparator;
+        private readonly List<ToolStripItem> serviceItems = new List<ToolStripItem>();
         private List<KeyValuePair<string, string>> cells;
         private ProcInfo target;
         private IntPtr targetWindow;
@@ -41,11 +42,89 @@ namespace ProcessStreamgraph
             copyValue.Click += (s, e) => CopyText(copyValue.Tag as string);
             copyRow = new ToolStripMenuItem("Copy Row", null, (s, e) => CopyText(CellMenu.RowText(cells)));
             copySeparator = new ToolStripSeparator();
+            // The items for the process's services go after this, and are rebuilt each time the menu opens.
+            serviceSeparator = new ToolStripSeparator();
             Items.AddRange(new ToolStripItem[]
             {
                 header, new ToolStripSeparator(), copyValue, copyRow, copySeparator, bringToFront, endTask, new ToolStripSeparator(),
-                openLocation, properties, new ToolStripSeparator(), connections, safetyReport
+                openLocation, properties, serviceSeparator, new ToolStripSeparator(), connections, safetyReport
             });
+        }
+
+        /// <summary>
+        /// Adds the service commands for each Windows service the process hosts, with whatever the service
+        /// accepts in its current state. A process hosting one service gets them in the menu itself; a
+        /// shared service host gets a submenu for each.
+        /// </summary>
+        private void FillServices(ProcInfo process)
+        {
+            foreach (ToolStripItem item in serviceItems)
+            {
+                Items.Remove(item);
+                item.Dispose();
+            }
+            serviceItems.Clear();
+            ServiceInfo[] services = process.Alive ? process.Services ?? new ServiceInfo[0] : new ServiceInfo[0];
+            serviceSeparator.Visible = services.Length > 0;
+            if (services.Length == 0) return;
+
+            int at = Items.IndexOf(serviceSeparator) + 1;
+            if (services.Length == 1)
+            {
+                foreach (ToolStripItem item in ServiceItems(services[0], " Service"))
+                {
+                    Items.Insert(at++, item);
+                    serviceItems.Add(item);
+                }
+                return;
+            }
+            foreach (ServiceInfo service in services)
+            {
+                ToolStripItem[] items = ServiceItems(service, "", out string status);
+                var submenu = new ToolStripMenuItem(status == null ? service.DisplayName : $"{service.DisplayName}  ·  {status}");
+                submenu.DropDownItems.AddRange(items);
+                var dropDown = (ToolStripDropDownMenu)submenu.DropDown;
+                dropDown.ShowImageMargin = false;
+                dropDown.Renderer = Renderer;
+                dropDown.Font = Font;
+                Items.Insert(at++, submenu);
+                serviceItems.Add(submenu);
+            }
+        }
+
+        private ToolStripItem[] ServiceItems(ServiceInfo service, string suffix) => ServiceItems(service, suffix, out _);
+
+        /// <param name="suffix">Follows each command's name: " Service" when it stands in the menu itself.</param>
+        private ToolStripItem[] ServiceItems(ServiceInfo service, string suffix, out string status)
+        {
+            ServiceCommand[] commands = ServiceActions.Available(service.Name, out var state);
+            status = ServiceActions.StatusText(state);
+            var items = new List<ToolStripItem>
+            {
+                new ToolStripMenuItem((suffix.Length == 0 ? "Properties" : "Service Properties") + "…", null,
+                                      (s, e) => ServicePropertiesRequested?.Invoke(service))
+            };
+            foreach (ServiceCommand command in commands)
+                items.Add(new ToolStripMenuItem(ServiceActions.Verb(command) + suffix, null, (s, e) => RunService(service, command)));
+            return items.ToArray();
+        }
+
+        private async void RunService(ServiceInfo service, ServiceCommand command)
+        {
+            if (command == ServiceCommand.Stop || command == ServiceCommand.Restart)
+            {
+                string[] dependents = ServiceActions.RunningDependents(service.Name);
+                string also = dependents.Length == 0 ? ""
+                    : "\n\nThese services depend on it and will also stop:\n" + string.Join("\n", dependents.Select(d => "    " + d));
+                string verb = command == ServiceCommand.Stop ? "Stop" : "Restart";
+                DialogResult answer = MessageBox.Show(owner,
+                    $"{verb} {service.DisplayName} ({service.Name})?{also}\n\nPrograms relying on it may stop working until it runs again.",
+                    verb + " Service", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                if (answer != DialogResult.Yes) return;
+            }
+            string error = await ServiceActions.RunAsync(command, service);
+            ServiceDirectory.RefreshSoon();
+            Report(error);
         }
 
         private static void CopyText(string text)
@@ -58,6 +137,9 @@ namespace ProcessStreamgraph
 
         /// <summary>Raised when the Connections item is chosen.</summary>
         public event Action<ProcInfo> ConnectionsRequested;
+
+        /// <summary>Raised when a service's Properties item is chosen.</summary>
+        public event Action<ServiceInfo> ServicePropertiesRequested;
 
         public Theme Theme
         {
@@ -89,6 +171,7 @@ namespace ProcessStreamgraph
             safetyReport.Enabled = process.Report != null;
             // Menus otherwise take the system menu font, which comes out larger than the table's.
             if (!Equals(Font, fontSource.Font)) Font = fontSource.Font;
+            FillServices(process);
             CellMenu.Fill(copyValue, cells, clicked);
             copyRow.Visible = copySeparator.Visible = cells != null;
             Show(screenLocation);

@@ -18,6 +18,9 @@ namespace ProcessStreamgraph
     internal sealed class ProcessTreePanel : UserControl
     {
         private readonly HeaderRow header;
+        // The tree draws its own columns, so it scrolls them sideways itself, by this bar.
+        private readonly HScrollBar scrollBar;
+        private Theme theme = Theme.Light;
 
         public ProcessTree Tree { get; }
 
@@ -25,18 +28,51 @@ namespace ProcessStreamgraph
         {
             Tree = new ProcessTree { Dock = DockStyle.Fill };
             header = new HeaderRow(Tree) { Dock = DockStyle.Top };
+            scrollBar = new HScrollBar { Dock = DockStyle.Bottom, Visible = false };
             Controls.Add(Tree);
             Controls.Add(header);
-            Tree.Resize += (s, e) => header.Invalidate();
+            Controls.Add(scrollBar);
+            Tree.Resize += (s, e) => { header.Invalidate(); UpdateScrollBar(); };
             Tree.SortChanged += header.Invalidate;
-            Tree.ColumnsChanged += delta => header.Invalidate();
-            Tree.ColumnsResized += header.Invalidate;
+            Tree.ColumnsChanged += delta => { header.Invalidate(); UpdateScrollBar(); };
+            Tree.ColumnsResized += () => { header.Invalidate(); UpdateScrollBar(); };
+            Tree.HorizontalScrolled += () =>
+            {
+                header.Invalidate();
+                if (scrollBar.Visible && scrollBar.Value != Tree.ScrollX) scrollBar.Value = Tree.ScrollX;
+            };
+            scrollBar.ValueChanged += (s, e) => Tree.ScrollX = scrollBar.Value;
+            scrollBar.HandleCreated += (s, e) => ApplyScrollBarTheme();
         }
 
         public void ApplyTheme(Theme theme)
         {
+            this.theme = theme;
             header.Theme = theme;
             Tree.Theme = theme;
+            ApplyScrollBarTheme();
+        }
+
+        private void ApplyScrollBarTheme()
+        {
+            if (scrollBar.IsHandleCreated)
+                NativeMethods.SetWindowTheme(scrollBar.Handle, theme.IsDark ? "DarkMode_Explorer" : null, null);
+        }
+
+        /// <summary>Shows the scroll bar while the columns are wider than the tree, sized to match.</summary>
+        private void UpdateScrollBar()
+        {
+            int max = Tree.MaxScrollX;
+            Tree.ScrollX = Tree.ScrollX;     // within the new range
+            if (max > 0)
+            {
+                // A scroll bar's value reaches Maximum - LargeChange + 1, which is then max.
+                scrollBar.LargeChange = Math.Max(1, Tree.ClientSize.Width);
+                scrollBar.SmallChange = Math.Max(1, (int)(20 * DeviceDpi / 96f));
+                scrollBar.Maximum = max + scrollBar.LargeChange - 1;
+                scrollBar.Value = Tree.ScrollX;
+            }
+            scrollBar.Visible = max > 0;
         }
 
         private sealed class HeaderRow : Control
@@ -80,7 +116,8 @@ namespace ProcessStreamgraph
                 if (column == TreeColumn.Name)
                 {
                     int pad = tree.CellPadding;
-                    return new Rectangle(pad, 0, Math.Max(0, tree.ColumnRect(TreeColumn.Name, 0, Height).Right - pad), Height);
+                    int left = pad - tree.ScrollX;
+                    return new Rectangle(left, 0, Math.Max(0, tree.ColumnRect(TreeColumn.Name, 0, Height).Right - left), Height);
                 }
                 return ProcessTree.IsText(column) ? tree.TextCellRect(column, 0, Height) : tree.FigureCellRect(column, 0, Height);
             }
@@ -140,6 +177,13 @@ namespace ProcessStreamgraph
                     hot = column;
                     Invalidate();
                 }
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                // Shift and the wheel over the titles scroll the columns, as over the rows.
+                if (tree.ScrollByWheel(ref m)) return;
+                base.WndProc(ref m);
             }
 
             protected override void OnMouseLeave(EventArgs e)
@@ -532,7 +576,62 @@ namespace ProcessStreamgraph
             }
             int width = ColumnWidth(column);
             if (column == FillColumn) width = Math.Max(width, ClientSize.Width - CellPadding - left);
-            return new Rectangle(left, top, width, height);
+            return new Rectangle(left - scrollX, top, width, height);
+        }
+
+        private int scrollX;
+
+        /// <summary>How far the columns are scrolled to the left, in pixels.</summary>
+        public int ScrollX
+        {
+            get => scrollX;
+            set
+            {
+                value = Math.Max(0, Math.Min(MaxScrollX, value));
+                if (value == scrollX) return;
+                scrollX = value;
+                Invalidate();
+                HorizontalScrolled?.Invoke();
+            }
+        }
+
+        /// <summary>How far the columns can scroll: how much wider they are than the tree, in pixels.</summary>
+        public int MaxScrollX
+        {
+            get
+            {
+                int width = CellPadding;
+                foreach (TreeColumn column in order) width += ColumnWidth(column);
+                return Math.Max(0, width - ClientSize.Width);
+            }
+        }
+
+        /// <summary>Raised when the columns are scrolled sideways.</summary>
+        public event Action HorizontalScrolled;
+
+        /// <summary>Scrolls the columns for Shift and the wheel, or a tilting wheel; false for any other message.</summary>
+        public bool ScrollByWheel(ref Message m)
+        {
+            int pixels = HorizontalWheel.Pixels(ref m, DpiScale);
+            if (pixels == 0) return false;
+            ScrollX += pixels;
+            m.Result = m.Msg == NativeMethods.WM_MOUSEHWHEEL ? (IntPtr)1 : IntPtr.Zero;
+            return true;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (ScrollByWheel(ref m)) return;
+            // The control lays out rows unscrolled, and they are drawn scrollX to the left of that, so
+            // clicks are moved back by as much: then a click on an expander lands on the control's own.
+            if (scrollX != 0 && (m.Msg == NativeMethods.WM_LBUTTONDOWN || m.Msg == NativeMethods.WM_LBUTTONUP ||
+                                 m.Msg == NativeMethods.WM_LBUTTONDBLCLK))
+            {
+                long position = m.LParam.ToInt64();
+                int x = (short)(position & 0xFFFF) + scrollX, y = (short)((position >> 16) & 0xFFFF);
+                m.LParam = (IntPtr)((y << 16) | (x & 0xFFFF));
+            }
+            base.WndProc(ref m);
         }
 
         /// <summary>A text column's cell: left-aligned, so set in from the figures of the column before it.</summary>
@@ -691,11 +790,12 @@ namespace ProcessStreamgraph
 
             if (area.Left < nameRight)
             {
-                int iconLeft = e.Bounds.Left;
+                int textLeft = e.Bounds.Left - scrollX;
+                int iconLeft = textLeft;
                 if (ImageList != null)
                 {
                     Size icon = ImageList.ImageSize;
-                    iconLeft = e.Bounds.Left - icon.Width - (int)(3 * DpiScale);
+                    iconLeft = textLeft - icon.Width - (int)(3 * DpiScale);
                     if (e.Node.ImageIndex >= 0 && e.Node.ImageIndex < ImageList.Images.Count)
                         ImageList.Draw(e.Graphics, iconLeft, row.Top + (row.Height - icon.Height) / 2, e.Node.ImageIndex);
                 }
@@ -704,7 +804,7 @@ namespace ProcessStreamgraph
 
                 // Swatch in the colour this process has in the graphs.
                 int swatch = (int)(9 * DpiScale);
-                var swatchRect = new Rectangle(e.Bounds.Left + 2, row.Top + (row.Height - swatch) / 2, swatch, swatch);
+                var swatchRect = new Rectangle(textLeft + 2,row.Top + (row.Height - swatch) / 2, swatch, swatch);
                 using (var brush = new SolidBrush(p.Color))
                     e.Graphics.FillRectangle(brush, swatchRect);
 

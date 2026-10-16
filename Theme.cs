@@ -22,6 +22,7 @@ namespace ProcessStreamgraph
         public Color PrimaryInk, SecondaryInk, MutedInk;
         public Color Grid, Axis;
         public Color Silhouette;        // shows through wherever layers are too thin to draw individually
+        public Color SystemHatch;       // stripes over the silhouette colour on the memory no process holds
         public Color TooltipBack;
 
         public static readonly Theme Light = new Theme
@@ -45,6 +46,7 @@ namespace ProcessStreamgraph
             Grid = Rgb(0xe1e0d9),
             Axis = Rgb(0xc3c2b7),
             Silhouette = Rgb(0xc9c8c0),
+            SystemHatch = Rgb(0xb0afa6),
             TooltipBack = Color.White
         };
 
@@ -70,6 +72,7 @@ namespace ProcessStreamgraph
             Grid = Rgb(0x2c2c2a),
             Axis = Rgb(0x4a4a46),
             Silhouette = Rgb(0x55554f),
+            SystemHatch = Rgb(0x6c6c65),
             TooltipBack = Rgb(0x2c2c2a)
         };
 

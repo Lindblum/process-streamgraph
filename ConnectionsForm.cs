@@ -91,7 +91,7 @@ namespace ProcessStreamgraph
                   (monitor.Network.NamesAvailable ? "" : " Domains come from reverse lookups, and may name a hosting company rather than the site.")) +
                 " Safety is the most serious finding of the sources under Safety Sources; hover over it for details.";
 
-            list = new ListView
+            list = new WheelListView
             {
                 Dock = DockStyle.Fill,
                 View = View.Details,
@@ -614,7 +614,7 @@ namespace ProcessStreamgraph
         /// Paints the header past its last column, which the list leaves in the system's colour, in the
         /// colour of the columns' own headers.
         /// </summary>
-        private sealed class HeaderFiller : NativeWindow
+        internal sealed class HeaderFiller : NativeWindow
         {
             private const int LVM_GETHEADER = 0x101F, HDM_GETITEMCOUNT = 0x1200, HDM_GETITEMRECT = 0x1207, WM_PAINT = 0x000F;
             private readonly Theme theme;

@@ -376,6 +376,9 @@ namespace ProcessStreamgraph
             }
         }
 
+        /// <summary>Has the next update list the services again, after one has been started or stopped.</summary>
+        public static void RefreshSoon() => nextRefresh = DateTime.MinValue;
+
         private static bool SameServices(ServiceInfo[] a, List<ServiceInfo> b)
         {
             int countA = a?.Length ?? 0, countB = b?.Count ?? 0;

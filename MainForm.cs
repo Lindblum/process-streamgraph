@@ -23,7 +23,8 @@ namespace ProcessStreamgraph
         private Control toolbar;
         private ComboBox[] dropdowns;
         private NumericUpDown refreshSeconds;
-        private Button safetySources;
+        private Button safetySources, fileInUse;
+        private FileInUseForm fileInUseForm;
         // Time-axis spans, in seconds, that the mouse wheel steps through over the graphs.
         private static readonly int[] ZoomSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
         private int zoom = ZoomSpans.Length - 1;
@@ -64,6 +65,7 @@ namespace ProcessStreamgraph
             processMenu = new ProcessMenu(monitor, this, tree);
             processMenu.SafetyReportRequested += ShowSafetyReport;
             processMenu.ConnectionsRequested += ShowConnections;
+            processMenu.ServicePropertiesRequested += ShowServiceProperties;
             // Safety results arrive in bursts; one pass over the visible rows covers each burst.
             safety.Updated += tree.QueueRefreshChangedCells;
             tree.MouseUp += (s, e) =>
@@ -257,6 +259,14 @@ namespace ProcessStreamgraph
                 foreach (StreamGraphControl graph in streamGraphs) graph.Reverse = reverse.Checked;
             };
 
+            var systemBand = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
+            systemBand.Items.AddRange(new object[] { "On top", "At bottom" });
+            systemBand.SelectedIndex = 0;
+            systemBand.SelectedIndexChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.SystemBandAtBottom = systemBand.SelectedIndex == 1;
+            };
+
             var themes = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
             themes.Items.Add("System default");
             foreach (Theme theme in Theme.All) themes.Items.Add(theme.Name);
@@ -271,7 +281,9 @@ namespace ProcessStreamgraph
             bar.Controls.Add(new Label { Text = "Sort layers by:", AutoSize = true, Anchor = AnchorStyles.Left });
             bar.Controls.Add(sort);
             bar.Controls.Add(reverse);
-            bar.Controls.Add(new Label { Text = "Theme:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(new Label { Text = "System band:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(systemBand);
+            bar.Controls.Add(new Label { Text = "Theme:", Margin = new Padding(21, 0, 3, 0), AutoSize = true, Anchor = AnchorStyles.Left });
             bar.Controls.Add(themes);
 
             refreshSeconds = new NumericUpDown
@@ -305,7 +317,19 @@ namespace ProcessStreamgraph
             };
             safetySources.Click += (s, e) => ShowSafetySources();
             bar.Controls.Add(safetySources);
-            dropdowns = new[] { sort, themes };
+
+            fileInUse = new Button
+            {
+                Text = "File in Use…",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Anchor = AnchorStyles.Left,
+                Padding = new Padding(6, 0, 6, 0),
+                Margin = new Padding(6, 0, 3, 0)
+            };
+            fileInUse.Click += (s, e) => ShowFileInUse();
+            bar.Controls.Add(fileInUse);
+            dropdowns = new[] { sort, systemBand, themes };
             return bar;
         }
 
@@ -325,10 +349,13 @@ namespace ProcessStreamgraph
             }
             refreshSeconds.BackColor = theme.IsDark ? theme.InactiveSelection : theme.Window;
             refreshSeconds.ForeColor = theme.WindowText;
-            safetySources.FlatStyle = theme.IsDark ? FlatStyle.Flat : FlatStyle.Standard;
-            safetySources.BackColor = theme.IsDark ? theme.InactiveSelection : SystemColors.Control;
-            safetySources.ForeColor = theme.ControlText;
-            if (theme.IsDark) safetySources.FlatAppearance.BorderColor = theme.Border;
+            foreach (Button button in new[] { safetySources, fileInUse })
+            {
+                button.FlatStyle = theme.IsDark ? FlatStyle.Flat : FlatStyle.Standard;
+                button.BackColor = theme.IsDark ? theme.InactiveSelection : SystemColors.Control;
+                button.ForeColor = theme.ControlText;
+                if (theme.IsDark) button.FlatAppearance.BorderColor = theme.Border;
+            }
             split.BackColor = theme.Control;
             graphs.BackColor = theme.Border;
             graphFiller.BackColor = theme.Surface;
@@ -510,6 +537,13 @@ namespace ProcessStreamgraph
             form.Show(this);
         }
 
+        private void ShowServiceProperties(ServiceInfo service)
+        {
+            var form = new ServicePropertiesForm(service, theme, DeviceDpi, tree.Font);
+            form.FormClosed += (s, e) => form.Dispose();
+            form.Show(this);
+        }
+
         private void ShowSafetySources()
         {
             using (var form = new SafetySourcesForm(safety.Settings, theme, DeviceDpi, tree.Font))
@@ -524,6 +558,24 @@ namespace ProcessStreamgraph
                     MessageBox.Show(this, "Could not save the safety settings: " + e.Message, "Process Streamgraph", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+        }
+
+        /// <summary>Opens the window that finds what has a file open, or brings it forward if it is already open.</summary>
+        private void ShowFileInUse()
+        {
+            if (fileInUseForm != null)
+            {
+                fileInUseForm.Activate();
+                return;
+            }
+            fileInUseForm = new FileInUseForm(monitor, icons, theme, DeviceDpi, tree.Font, SelectInTree,
+                (process, location) => processMenu.Show(process, location), RestartElevated);
+            fileInUseForm.FormClosed += (s, e) =>
+            {
+                fileInUseForm.Dispose();
+                fileInUseForm = null;
+            };
+            fileInUseForm.Show(this);
         }
 
         private void SetSelected(ProcInfo process)

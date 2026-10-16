@@ -133,6 +133,7 @@ namespace ProcessStreamgraph
         private IntPtr buffer;
         private int bufferSize = 1 << 20;
         private long lastTimestamp;
+        private long lastInterruptTime;
         private long lastSampleFileTime;
 
         /// <summary>Index of the most recent sample; -1 before the first one.</summary>
@@ -159,6 +160,31 @@ namespace ProcessStreamgraph
 
         /// <summary>Physical memory in bytes.</summary>
         public long TotalPhysicalMemory { get; } = NativeMethods.GetTotalPhysicalMemory();
+
+        /// <summary>
+        /// Memory in use that no process holds privately: kernel pools, shared libraries and mapped
+        /// files, page tables and driver allocations. Together with the processes' private working sets
+        /// it makes up Task Manager's "In use". Not one of <see cref="Processes"/>; only memory is set.
+        /// </summary>
+        public ProcInfo SystemMemory { get; } = new ProcInfo
+        {
+            Pid = -1, Name = "System & shared", DisplayName = "System & shared",
+            Details = "Kernel, shared libraries and files, page tables, drivers"
+        };
+
+        /// <summary>
+        /// Processor time spent on hardware interrupts and deferred procedure calls, which no process is
+        /// charged for. Not one of <see cref="Processes"/>; only CPU is set.
+        /// </summary>
+        public ProcInfo Interrupts { get; } = new ProcInfo
+        {
+            Pid = -2, Name = "Interrupts & DPCs", DisplayName = "Interrupts & DPCs",
+            Details = "Hardware and drivers, charged to no process"
+        };
+
+        /// <summary>The band for what the metric's processes leave out, or null when it has none.</summary>
+        public ProcInfo SystemLayer(Metric metric) =>
+            metric == Metric.Memory ? SystemMemory : metric == Metric.Cpu ? Interrupts : null;
 
         public ProcessMonitor()
         {
@@ -203,6 +229,7 @@ namespace ProcessStreamgraph
             Added.Clear();
             Removed.Clear();
 
+            long privateTotal = 0;
             IntPtr entry = buffer;
             while (true)
             {
@@ -234,6 +261,7 @@ namespace ProcessStreamgraph
                 // The idle process "uses" whatever nobody else does, so it stays out of the CPU graph.
                 p.CpuHistory[slot] = pid == 0 ? 0f : (float)p.Cpu;
                 p.MemHistory[slot] = p.Memory / 1048576f;
+                privateTotal += p.Memory;
                 traffic.TryGetValue(pid, out long bytes);
                 p.Network = seconds > 0 ? bytes / 1024.0 / seconds : 0;
                 p.NetHistory[slot] = (float)p.Network;
@@ -241,6 +269,17 @@ namespace ProcessStreamgraph
                 if (spi.NextEntryOffset == 0) break;
                 entry = IntPtr.Add(entry, (int)spi.NextEntryOffset);
             }
+
+            SystemMemory.Memory = Math.Max(0, NativeMethods.GetMemoryInUse() - privateTotal);
+            SystemMemory.MemHistory[slot] = SystemMemory.Memory / 1048576f;
+            SystemMemory.LastSample = SampleIndex;
+
+            long interruptTime = NativeMethods.GetInterruptAndDpcTime(processorCount);
+            double interrupts = cpuCapacity > 0 && lastInterruptTime > 0 ? (interruptTime - lastInterruptTime) * 100.0 / cpuCapacity : 0;
+            lastInterruptTime = interruptTime;
+            Interrupts.Cpu = Math.Max(0, Math.Min(100, interrupts));
+            Interrupts.CpuHistory[slot] = (float)Interrupts.Cpu;
+            Interrupts.LastSample = SampleIndex;
 
             // Traffic by endpoint goes to the processes as they now stand, new ones included.
             if (flows.Count > 0)

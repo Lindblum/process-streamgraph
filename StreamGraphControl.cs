@@ -40,6 +40,7 @@ namespace ProcessStreamgraph
 
         private SortMode sortMode = SortMode.Usage;
         private bool reverse;
+        private bool systemBandAtBottom;
         private Theme theme = Theme.Light;
         private bool collapsed;
         private ProcInfo selected;
@@ -109,6 +110,13 @@ namespace ProcessStreamgraph
         {
             get => reverse;
             set { reverse = value; Rebuild(); }
+        }
+
+        /// <summary>Whether the band for what no process is charged for sits under the processes rather than on top.</summary>
+        public bool SystemBandAtBottom
+        {
+            get => systemBandAtBottom;
+            set { systemBandAtBottom = value; Rebuild(); }
         }
 
         public Theme Theme
@@ -259,6 +267,15 @@ namespace ProcessStreamgraph
             }
             list.Sort(CompareLayers);
             if (reverse) list.Reverse();
+            ProcInfo system = monitor.SystemLayer(metric);
+            if (system != null)
+            {
+                // What no process is charged for sits on top or at the bottom in every order, so the
+                // total covers it: memory in use reaches Task Manager's "In use", CPU adds interrupts and DPCs.
+                double sum = 0;
+                for (int i = 0; i < n; i++) sum += system.Value(metric, firstSample + i);
+                if (sum > 0) list.Insert(systemBandAtBottom ? 0 : list.Count, new Layer { Process = system, Sum = sum });
+            }
             layers = list.ToArray();
 
             if (cum.Length < (layers.Length + 1) * n) cum = new float[(layers.Length + 1) * n];
@@ -578,14 +595,17 @@ namespace ProcessStreamgraph
         {
             float s = DpiScale;
             float latest = n > 0 ? total[n - 1] : 0;
+            float system = n > 0 && monitor.SystemLayer(metric) != null ? monitor.SystemLayer(metric).Value(metric, firstSample + n - 1) : 0;
             string summary;
             if (Unavailable)
                 summary = "";
             else if (metric == Metric.Cpu)
-                summary = $"{Format.CpuPercent(latest)} of {monitor.ProcessorCount} logical processors";
+                summary = $"{Format.CpuPercent(latest)} of {monitor.ProcessorCount} logical processors, {Format.CpuPercent(system)} interrupts & DPCs";
             else if (metric == Metric.Memory)
-                summary = $"{Format.Memory(latest)} private working set in {monitor.LiveCount} processes, " +
-                          $"{latest / fullScale * 100:0}% of {Format.Memory(fullScale)} RAM";
+            {
+                summary = $"{Format.Memory(latest)} in use, {latest / fullScale * 100:0}% of {Format.Memory(fullScale)} RAM: " +
+                          $"{Format.Memory(latest - system)} private to {monitor.LiveCount} processes, {Format.Memory(system)} system & shared";
+            }
             else
                 summary = $"{Format.Rate(latest)} sent and received";
             using (var primary = new SolidBrush(theme.PrimaryInk))
@@ -671,7 +691,7 @@ namespace ProcessStreamgraph
                 using (GraphicsPath path = BuildLayerPath(l))
                 {
                     if (path.PointCount == 0) continue;
-                    using (var brush = new SolidBrush(layers[l].Process.Color))
+                    using (Brush brush = LayerBrush(layers[l].Process))
                         g.FillPath(brush, path);
                 }
             }
@@ -698,7 +718,23 @@ namespace ProcessStreamgraph
             }
         }
 
+        private bool IsSystemLayer(ProcInfo process) => process != null && process == monitor.SystemLayer(metric);
+
+        // What no process is charged for is striped, so it does not read as one more process.
+        private Brush LayerBrush(ProcInfo process) => IsSystemLayer(process)
+            ? (Brush)new HatchBrush(HatchStyle.WideUpwardDiagonal, theme.SystemHatch, theme.Silhouette)
+            : new SolidBrush(process.Color);
+
         protected override void OnPaint(PaintEventArgs e)
+        {
+            // GDI+ throws "A generic error occurred" when the window's device context is unusable for a
+            // moment: the workstation is locked, the display is asleep, or DWM is restarting or short of
+            // memory. Our bitmaps are fine, so skip this frame; the next refresh paints normally.
+            try { PaintFrame(e); }
+            catch (System.Runtime.InteropServices.ExternalException) { }
+        }
+
+        private void PaintFrame(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             if (cache == null)
@@ -779,12 +815,13 @@ namespace ProcessStreamgraph
             DateTime? started = process.StartTime;
             if (started.HasValue) detail += "  ·  started " + started.Value.ToString(started.Value.Date == DateTime.Today ? "T" : "g");
             if (!process.Alive) detail += "  ·  exited";
+            if (IsSystemLayer(process)) detail = process.Details;
 
             Image icon = hoverIcon;
             float iconSize = 32 * s, pad = 10 * s, gap = 10 * s, key = 4 * s;
             float lineHeight = Font.GetHeight(g) + 2 * s;
             // What the process is for, beside its name, to tell it from siblings running the same program.
-            string about = process.Details.Length == 0 ? "" : "  " + (process.Details.Length <= 60 ? process.Details : process.Details.Substring(0, 59) + "…");
+            string about = process.Details.Length == 0 || IsSystemLayer(process) ? "" : "  " + (process.Details.Length <= 60 ? process.Details : process.Details.Substring(0, 59) + "…");
             SizeF nameSize = g.MeasureString(process.DisplayName, BoldFont);
             SizeF aboutSize = g.MeasureString(about, Font);
             nameSize.Width += about.Length == 0 ? 0 : aboutSize.Width - 4 * s;
@@ -809,7 +846,7 @@ namespace ProcessStreamgraph
             using (var shadowBrush = new SolidBrush(Color.FromArgb(theme.IsDark ? 90 : 36, 0, 0, 0)))
             using (var back = new SolidBrush(theme.TooltipBack))
             using (var border = new Pen(Color.FromArgb(60, theme.PrimaryInk), 1))
-            using (var keyBrush = new SolidBrush(process.Color))
+            using (Brush keyBrush = LayerBrush(process))
             using (var primary = new SolidBrush(theme.PrimaryInk))
             using (var secondary = new SolidBrush(theme.SecondaryInk))
             {
@@ -909,7 +946,8 @@ namespace ProcessStreamgraph
             mouseInside = true;
             mouse = e.Location;
             UpdateHover();
-            if (hoverProcess == null) return;
+            // The system band has a tooltip but is no process to select or act on.
+            if (hoverProcess == null || IsSystemLayer(hoverProcess)) return;
             if (e.Button == MouseButtons.Left) ProcessClicked?.Invoke(hoverProcess);
             else ProcessMenuRequested?.Invoke(hoverProcess, PointToScreen(e.Location));
         }
