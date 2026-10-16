@@ -16,6 +16,7 @@ namespace ProcessStreamgraph
         private readonly ProcessTree tree;
         private readonly StreamGraphControl[] streamGraphs;
         private readonly TableLayoutPanel graphs;
+        private readonly Panel graphScroll;    // scrolls the graphs when they do not all fit at their minimum height
         private readonly Panel graphFiller;
         private readonly SplitContainer split;
         private readonly Timer timer;
@@ -25,10 +26,13 @@ namespace ProcessStreamgraph
         private NumericUpDown refreshSeconds;
         private Button safetySources, fileInUse;
         private FileInUseForm fileInUseForm;
-        // Time-axis spans, in seconds, that the mouse wheel steps through over the graphs.
-        private static readonly int[] ZoomSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
-        private int zoom = ZoomSpans.Length - 1;
-        private int wheelRemainder;
+        // Lengths of the time axis, in seconds, that the time span slider steps through.
+        private static readonly int[] TimeSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
+        private Control timeBar;
+        private TrackBar timeSpan;
+        private const int MinGraphHeight = 200;     // an open graph's least automatic height, in 96-DPI units
+        private const int MinDraggedHeight = 100;   // the least height an open graph can be dragged to, likewise
+        private int[] graphHeights;                 // heights the graphs were dragged to, in 96-DPI units; null for automatic
         private readonly ProcessMenu processMenu;
         private readonly SafetyService safety;
         private Theme theme;
@@ -89,7 +93,7 @@ namespace ProcessStreamgraph
             // The panel's own colour shows as the one-pixel rules between the graphs.
             graphs = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
             graphs.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            var metrics = new[] { Metric.Cpu, Metric.Memory, Metric.Network };
+            var metrics = new[] { Metric.Cpu, Metric.Memory, Metric.Gpu, Metric.GpuMemory, Metric.Network };
             streamGraphs = new StreamGraphControl[metrics.Length];
             for (int i = 0; i < metrics.Length; i++)
             {
@@ -102,6 +106,13 @@ namespace ProcessStreamgraph
                 graph.ProcessMenuRequested += (process, location) => processMenu.Show(process, location, tree.CellsOf(process), -1);
                 graph.ElevationRequested += RestartElevated;
                 graph.CollapsedChanged += LayoutGraphs;
+                int index = i;
+                graph.HeightDragged += height => ResizeGraph(index, height);
+                graph.HeightResetRequested += () =>
+                {
+                    graphHeights = null;
+                    LayoutGraphs();
+                };
                 streamGraphs[i] = graph;
                 graphs.RowStyles.Add(new RowStyle());
                 graphs.Controls.Add(graph, 0, i);
@@ -110,12 +121,19 @@ namespace ProcessStreamgraph
             graphFiller = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 1, 0, 0) };
             graphs.RowStyles.Add(new RowStyle());
             graphs.Controls.Add(graphFiller, 0, metrics.Length);
+            // The graphs fill the scrolling panel's display area, which grows past the visible part
+            // when the open graphs need more room than there is.
+            graphScroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            graphScroll.Controls.Add(graphs);
+            graphScroll.HandleCreated += (s, e) => ThemeScrollBar();
             LayoutGraphs();
             FontChanged += (s, e) => LayoutGraphs();
+            DpiChanged += (s, e) => LayoutGraphs();
 
             split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
             split.Panel1.Controls.Add(treePanel);
-            split.Panel2.Controls.Add(graphs);
+            split.Panel2.Controls.Add(graphScroll);
+            split.Panel2.Controls.Add(timeBar = BuildTimeBar());
 
             Controls.Add(split);
             Controls.Add(toolbar = BuildToolbar());
@@ -135,26 +153,22 @@ namespace ProcessStreamgraph
         }
 
         /// <summary>
-        /// Mouse wheel over a graph zooms the time axis of all of them. Done as a message filter because
-        /// wheel messages otherwise go to whichever control has the focus, normally the tree.
+        /// Mouse wheel anywhere over the graphs scrolls them. Done as a message filter because wheel
+        /// messages otherwise go to whichever control has the focus, normally the tree.
         /// </summary>
         public bool PreFilterMessage(ref Message m)
         {
             if (m.Msg != NativeMethods.WM_MOUSEWHEEL) return false;
             long position = m.LParam.ToInt64();
             var point = new Point((short)(position & 0xFFFF), (short)((position >> 16) & 0xFFFF));
-            if (!(FromHandle(NativeMethods.WindowFromPoint(point)) is StreamGraphControl)) return false;
-
-            // One notch is 120 units; precision wheels and touchpads send smaller amounts.
-            wheelRemainder += (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
-            int notches = wheelRemainder / 120;
-            wheelRemainder -= notches * 120;
-            int target = Math.Max(0, Math.Min(ZoomSpans.Length - 1, zoom - notches));
-            if (target != zoom)
-            {
-                zoom = target;
-                foreach (StreamGraphControl graph in streamGraphs) graph.VisibleSeconds = ZoomSpans[zoom];
-            }
+            Control under = FromHandle(NativeMethods.WindowFromPoint(point));
+            if (!(under is StreamGraphControl) && under != graphFiller && under != graphScroll && under != graphs) return false;
+            if (!graphScroll.VerticalScroll.Visible) return true;
+            int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+            // The system setting is lines per notch, or -1 for a page at a time.
+            int lines = SystemInformation.MouseWheelScrollLines;
+            int pixels = lines > 0 ? delta * lines * Font.Height / 120 : delta * graphScroll.ClientSize.Height / 120;
+            graphScroll.AutoScrollPosition = new Point(0, -graphScroll.AutoScrollPosition.Y - pixels);
             return true;
         }
 
@@ -164,24 +178,54 @@ namespace ProcessStreamgraph
         // The tree pane never takes more than this, so the graphs keep a usable width.
         private int MaxTreePane => split.Width * 3 / 5;
 
-        /// <summary>Collapsed graphs get just their heading line; the open ones share the rest equally.</summary>
+        /// <summary>
+        /// Collapsed graphs get just their heading line. Open ones share the rest equally, but never
+        /// shrink below a minimum height, until one is dragged to a height of its own: from then on each
+        /// keeps the height it has, and any room left over stays empty below them. When the graphs need
+        /// more room than there is, the panel scrolls.
+        /// </summary>
         private void LayoutGraphs()
         {
-            int open = 0;
-            foreach (StreamGraphControl graph in streamGraphs)
+            int open = 0, needed = 0;
+            for (int i = 0; i < streamGraphs.Length; i++)
+            {
+                StreamGraphControl graph = streamGraphs[i];
                 if (!graph.Collapsed) open++;
+                int height = graph.Collapsed ? graph.HeadingHeight : (graphHeights?[i] ?? MinGraphHeight) * DeviceDpi / 96;
+                needed += height + graph.Margin.Vertical;
+            }
+            graphScroll.AutoScrollMinSize = new Size(0, needed);
 
             graphs.SuspendLayout();
             for (int i = 0; i < streamGraphs.Length; i++)
             {
                 StreamGraphControl graph = streamGraphs[i];
-                graphs.RowStyles[i] = graph.Collapsed
-                    ? new RowStyle(SizeType.Absolute, graph.HeadingHeight + graph.Margin.Vertical)
+                graphs.RowStyles[i] = graph.Collapsed ? new RowStyle(SizeType.Absolute, graph.HeadingHeight + graph.Margin.Vertical)
+                    : graphHeights != null ? new RowStyle(SizeType.Absolute, graphHeights[i] * DeviceDpi / 96 + graph.Margin.Vertical)
                     : new RowStyle(SizeType.Percent, 100f / open);
             }
-            graphs.RowStyles[streamGraphs.Length] = open == 0 ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, 0);
-            graphFiller.Visible = open == 0;
+            bool fill = open == 0 || graphHeights != null;
+            graphs.RowStyles[streamGraphs.Length] = fill ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.Absolute, 0);
+            graphFiller.Visible = fill;
             graphs.ResumeLayout();
+        }
+
+        /// <summary>
+        /// Gives a graph the height its bottom edge is dragged to. The first drag fixes every graph at the
+        /// height it has, so only the one dragged changes.
+        /// </summary>
+        private void ResizeGraph(int index, int pixels)
+        {
+            if (graphHeights == null)
+            {
+                graphHeights = new int[streamGraphs.Length];
+                for (int i = 0; i < streamGraphs.Length; i++)
+                    graphHeights[i] = streamGraphs[i].Collapsed ? MinGraphHeight : streamGraphs[i].Height * 96 / DeviceDpi;
+            }
+            int height = Math.Max(MinDraggedHeight, pixels * 96 / DeviceDpi);
+            if (height == graphHeights[index]) return;
+            graphHeights[index] = height;
+            LayoutGraphs();
         }
 
         private void RestartElevated()
@@ -226,6 +270,7 @@ namespace ProcessStreamgraph
             // The rescaling above does not reliably carry the splitter along, so place it explicitly.
             split.SplitterDistance = Math.Min(TreeWidth * actualDpi / 96, MaxTreePane);
             icons.SetSmallSize(16 * actualDpi / 96);
+            LayoutGraphs();
             NativeMethods.SetDarkTitleBar(Handle, streamGraphs[0].Theme.IsDark);
             base.OnLoad(e);
 
@@ -233,6 +278,45 @@ namespace ProcessStreamgraph
             timer.Start();
             animation.Start();
         }
+
+        /// <summary>The bar above the graphs with the slider that sets how much history they show.</summary>
+        private Control BuildTimeBar()
+        {
+            var bar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                Padding = new Padding(8, 2, 6, 2)
+            };
+            timeSpan = new TrackBar
+            {
+                Minimum = 0,
+                Maximum = TimeSpans.Length - 1,
+                Value = TimeSpans.Length - 1,
+                LargeChange = 1,
+                TickStyle = TickStyle.None,
+                AutoSize = false,
+                Width = 220,
+                Height = 26,
+                Anchor = AnchorStyles.Left
+            };
+            var shown = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Text = SpanText(TimeSpans[timeSpan.Value]) };
+            timeSpan.ValueChanged += (s, e) =>
+            {
+                int seconds = TimeSpans[timeSpan.Value];
+                shown.Text = SpanText(seconds);
+                foreach (StreamGraphControl graph in streamGraphs) graph.VisibleSeconds = seconds;
+            };
+            bar.Controls.Add(new Label { Text = "Time span:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(timeSpan);
+            bar.Controls.Add(shown);
+            return bar;
+        }
+
+        private static string SpanText(int seconds) =>
+            seconds < 60 ? seconds + " s" : seconds % 60 == 0 ? seconds / 60 + " min" : (seconds / 60.0).ToString("0.#") + " min";
 
         private Control BuildToolbar()
         {
@@ -359,11 +443,19 @@ namespace ProcessStreamgraph
             split.BackColor = theme.Control;
             graphs.BackColor = theme.Border;
             graphFiller.BackColor = theme.Surface;
+            graphScroll.BackColor = theme.Surface;
+            timeBar.BackColor = timeSpan.BackColor = theme.Control;
+            timeBar.ForeColor = theme.ControlText;
+            if (graphScroll.IsHandleCreated) ThemeScrollBar();
             treePanel.ApplyTheme(theme);
             foreach (StreamGraphControl graph in streamGraphs) graph.Theme = theme;
             processMenu.Theme = theme;
             if (IsHandleCreated) NativeMethods.SetDarkTitleBar(Handle, theme.IsDark);
         }
+
+        // The stock scroll bar has a dark variant only through the Explorer theme.
+        private void ThemeScrollBar() =>
+            NativeMethods.SetWindowTheme(graphScroll.Handle, theme.IsDark ? "DarkMode_Explorer" : null, null);
 
         private void TakeSample()
         {

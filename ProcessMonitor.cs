@@ -7,7 +7,7 @@ using System.Windows.Forms;
 
 namespace ProcessStreamgraph
 {
-    internal enum Metric { Cpu, Memory, Network }
+    internal enum Metric { Cpu, Memory, Network, Gpu, GpuMemory }
 
     /// <summary>Whether a process has a window and, if so, whether it is answering its messages.</summary>
     internal enum WindowState { None, Running, NotResponding }
@@ -29,6 +29,8 @@ namespace ProcessStreamgraph
         public double Cpu;               // latest sample, percent of all processors
         public long Memory;              // latest sample, private working set in bytes
         public double Network;           // latest sample, KB/s sent plus received
+        public double Gpu;               // latest sample, percent of the busiest GPU engine
+        public long GpuMemory;           // latest sample, dedicated video memory in bytes
         public WindowState WindowState;
         public SafetyReport Report;      // shared by every process running the same program file
         public string Role;              // its part in its program, from the command line; null when unknown
@@ -43,6 +45,8 @@ namespace ProcessStreamgraph
         internal readonly float[] CpuHistory = new float[ProcessMonitor.HistoryLength];
         internal readonly float[] MemHistory = new float[ProcessMonitor.HistoryLength];   // MB
         internal readonly float[] NetHistory = new float[ProcessMonitor.HistoryLength];   // KB/s
+        internal readonly float[] GpuHistory = new float[ProcessMonitor.HistoryLength];   // percent
+        internal readonly float[] GpuMemHistory = new float[ProcessMonitor.HistoryLength];   // MB
 
         public Safety Safety => Report?.Overall ?? Safety.Unrated;
 
@@ -102,12 +106,22 @@ namespace ProcessStreamgraph
             return parts.Length <= 2 ? trimmed + (parts.Length == 1 ? "\\" : "") : parts[parts.Length - 2] + "\\" + parts[parts.Length - 1];
         }
 
-        /// <summary>CPU percent, memory in MB or network KB/s at the given sample; 0 outside the process lifetime.</summary>
+        /// <summary>
+        /// CPU or GPU percent, memory or video memory in MB, or network KB/s at the given sample; 0
+        /// outside the process lifetime.
+        /// </summary>
         public float Value(Metric metric, long sample)
         {
             if (sample < FirstSample || sample > LastSample) return 0f;
             int slot = (int)(sample % ProcessMonitor.HistoryLength);
-            return metric == Metric.Cpu ? CpuHistory[slot] : metric == Metric.Memory ? MemHistory[slot] : NetHistory[slot];
+            switch (metric)
+            {
+                case Metric.Cpu: return CpuHistory[slot];
+                case Metric.Memory: return MemHistory[slot];
+                case Metric.Gpu: return GpuHistory[slot];
+                case Metric.GpuMemory: return GpuMemHistory[slot];
+                default: return NetHistory[slot];
+            }
         }
     }
 
@@ -130,6 +144,9 @@ namespace ProcessStreamgraph
         private readonly double[] sampleSeconds = new double[HistoryLength];
         private readonly int processorCount = Environment.ProcessorCount;
         private readonly NetworkMonitor network = new NetworkMonitor();
+        private readonly GpuMonitor gpu = new GpuMonitor();
+        private readonly Dictionary<int, double> gpuUsage = new Dictionary<int, double>();
+        private readonly Dictionary<int, long> gpuMemory = new Dictionary<int, long>();
         private IntPtr buffer;
         private int bufferSize = 1 << 20;
         private long lastTimestamp;
@@ -157,6 +174,9 @@ namespace ProcessStreamgraph
 
         /// <summary>True when network traffic is unavailable only because the process lacks the rights.</summary>
         public bool NetworkAccessDenied => network.AccessDenied;
+
+        /// <summary>The GPU counters, for whether they are available and which engine is busiest.</summary>
+        public GpuMonitor Gpu => gpu;
 
         /// <summary>Physical memory in bytes.</summary>
         public long TotalPhysicalMemory { get; } = NativeMethods.GetTotalPhysicalMemory();
@@ -220,6 +240,7 @@ namespace ProcessStreamgraph
 
             Dictionary<int, long> traffic = network.Drain();
             Dictionary<NetworkMonitor.Flow, NetworkMonitor.FlowBytes> flows = network.DrainFlows();
+            gpu.Sample(gpuUsage, gpuMemory);
             double seconds = elapsed100ns / 1e7;
 
             SampleIndex++;
@@ -265,6 +286,10 @@ namespace ProcessStreamgraph
                 traffic.TryGetValue(pid, out long bytes);
                 p.Network = seconds > 0 ? bytes / 1024.0 / seconds : 0;
                 p.NetHistory[slot] = (float)p.Network;
+                gpuUsage.TryGetValue(pid, out p.Gpu);
+                p.GpuHistory[slot] = (float)p.Gpu;
+                gpuMemory.TryGetValue(pid, out p.GpuMemory);
+                p.GpuMemHistory[slot] = p.GpuMemory / 1048576f;
 
                 if (spi.NextEntryOffset == 0) break;
                 entry = IntPtr.Add(entry, (int)spi.NextEntryOffset);

@@ -39,7 +39,16 @@ namespace ProcessStreamgraph
             return kilobytesPerSecond.ToString("0.##", CultureInfo.CurrentCulture) + " KB/s";
         }
 
+        /// <summary>Compact size in MB for axis ticks, which are always round numbers.</summary>
+        public static string MemoryTick(double megabytes)
+        {
+            if (megabytes >= 1024) return (megabytes / 1024).ToString("0.##", CultureInfo.CurrentCulture) + " GB";
+            return megabytes.ToString("0.##", CultureInfo.CurrentCulture) + " MB";
+        }
+
         public static string Value(Metric metric, double value) =>
-            metric == Metric.Cpu ? CpuPercent(value) : metric == Metric.Memory ? Memory(value) : Rate(value);
+            metric == Metric.Cpu || metric == Metric.Gpu ? CpuPercent(value)
+            : metric == Metric.Memory || metric == Metric.GpuMemory ? Memory(value)
+            : Rate(value);
     }
 }

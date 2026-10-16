@@ -52,7 +52,7 @@ namespace ProcessStreamgraph
         private readonly float[] total = new float[ProcessMonitor.HistoryLength];
         private int n;
         private long firstSample;
-        private readonly double fullScale;      // the value that reads as 100%; unused for network
+        private double fullScale;               // the value that reads as 100%; 0 when there is none, as for network
         private int visibleSeconds = ProcessMonitor.HistorySeconds;
         private double scaleMax = 1, tickStep = 1;
         private RectangleF plot;
@@ -87,14 +87,24 @@ namespace ProcessStreamgraph
         /// <summary>Raised by a click on the notice shown when network data needs administrator rights.</summary>
         public event Action ElevationRequested;
 
+        /// <summary>Raised while the bottom edge is dragged, with the height in pixels the graph is dragged to.</summary>
+        public event Action<int> HeightDragged;
+
+        /// <summary>Raised by a double-click on the bottom edge, to go back to the automatic height.</summary>
+        public event Action HeightResetRequested;
+
+        private int dragStartY = -1, dragStartHeight;   // screen y and height when an edge drag began; -1 when none
+
         public StreamGraphControl(ProcessMonitor monitor, IconCache icons, Metric metric)
         {
             this.monitor = monitor;
             this.icons = icons;
             this.metric = metric;
-            title = metric.ToString();
-            if (metric == Metric.Cpu) title = "CPU";
-            fullScale = metric == Metric.Cpu ? 100 : monitor.TotalPhysicalMemory / 1048576.0;
+            title = metric == Metric.Cpu ? "CPU" : metric == Metric.Gpu ? "GPU" : metric == Metric.GpuMemory ? "GPU Memory" : metric.ToString();
+            // Video memory gets its scale once the GPU counters are open; see BuildModel.
+            fullScale = metric == Metric.Cpu || metric == Metric.Gpu ? 100
+                : metric == Metric.Memory ? monitor.TotalPhysicalMemory / 1048576.0
+                : 0;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BackColor = theme.Surface;
@@ -141,6 +151,9 @@ namespace ProcessStreamgraph
         /// <summary>Height of the heading line, which is all a collapsed graph needs.</summary>
         public int HeadingHeight => (int)(Font.Height + 16 * DpiScale);
 
+        // The strip along the bottom edge that resizes the graph; an open graph's time labels sit above it.
+        private bool OnResizeEdge(int y) => !collapsed && y >= Height - (int)(6 * DpiScale);
+
         /// <summary>Length of the time axis, which always ends at the latest sample.</summary>
         public int VisibleSeconds
         {
@@ -174,10 +187,15 @@ namespace ProcessStreamgraph
 
         private float DpiScale => DeviceDpi / 96f;
 
-        // Network traffic can only be attributed to processes with administrator rights.
-        private bool Unavailable => metric == Metric.Network && !monitor.NetworkAvailable;
+        private bool IsGpu => metric == Metric.Gpu || metric == Metric.GpuMemory;
 
-        private bool CanElevate => Unavailable && monitor.NetworkAccessDenied;
+        // Network traffic can only be attributed to processes with administrator rights, and the GPU
+        // counters take a few seconds to open.
+        private bool Unavailable => (metric == Metric.Network && !monitor.NetworkAvailable) || (IsGpu && !monitor.Gpu.Available);
+
+        private bool CanElevate => metric == Metric.Network && Unavailable && monitor.NetworkAccessDenied;
+
+        private bool PercentScale => fullScale > 0;
 
         private Font BoldFont => boldFont ?? (boldFont = new Font(Font, FontStyle.Bold));
 
@@ -297,9 +315,11 @@ namespace ProcessStreamgraph
 
             float maxTotal = 0;
             for (int i = 0; i < n; i++) maxTotal = Math.Max(maxTotal, total[i]);
-            if (metric == Metric.Network)
+            // A percentage scale only when the adapters say how much dedicated memory they have.
+            if (metric == Metric.GpuMemory) fullScale = monitor.Gpu.DedicatedMemory / 1048576.0;
+            if (!PercentScale)
             {
-                // No natural ceiling, so the axis fits the visible peak, in round KB/s or MB/s steps.
+                // No natural ceiling, so the axis fits the visible peak, in round KB/s or MB/s steps, or MB or GB.
                 double top = Math.Max(maxTotal, 8);
                 double unit = top >= 1024 ? 1024 : 1;
                 tickStep = NiceStep(top / unit / 4) * unit;
@@ -543,8 +563,10 @@ namespace ProcessStreamgraph
                 {
                     if (Unavailable)
                     {
-                        DrawNotice(g, CanElevate
-                            ? "Per-process network usage needs administrator rights.\nClick here to restart as administrator."
+                        DrawNotice(g, IsGpu
+                            ? monitor.Gpu.Failed ? "Per-process GPU usage is not available on this system." : "Starting the GPU counters…"
+                            : CanElevate
+                            ?"Per-process network usage needs administrator rights.\nClick here to restart as administrator."
                             : "Per-process network usage is not available on this system.");
                     }
                     else
@@ -601,6 +623,11 @@ namespace ProcessStreamgraph
                 summary = "";
             else if (metric == Metric.Cpu)
                 summary = $"{Format.CpuPercent(latest)} of {monitor.ProcessorCount} logical processors, {Format.CpuPercent(system)} interrupts & DPCs";
+            else if (metric == Metric.Gpu)
+                summary = Format.CpuPercent(latest) + (monitor.Gpu.BusiestEngine != null ? $" of the busiest engine, {monitor.Gpu.BusiestEngine}" : "");
+            else if (metric == Metric.GpuMemory)
+                summary = $"{Format.Memory(latest)} dedicated video memory" +
+                          (PercentScale ? $", {latest / fullScale * 100:0}% of {Format.Memory(fullScale)}" : "");
             else if (metric == Metric.Memory)
             {
                 summary = $"{Format.Memory(latest)} in use, {latest / fullScale * 100:0}% of {Format.Memory(fullScale)} RAM: " +
@@ -669,7 +696,10 @@ namespace ProcessStreamgraph
                 {
                     float y = (float)Math.Round(Y((float)(tick * tickStep)));
                     g.DrawLine(tick == 0 ? axis : grid, plot.Left, y, plot.Right, y);
-                    string label = metric != Metric.Network ? tick * 10 + "%" : tick == 0 ? "0" : Format.RateTick(tick * tickStep);
+                    string label = PercentScale ? tick * 10 + "%"
+                        : tick == 0 ? "0"
+                        : metric == Metric.Network ? Format.RateTick(tick * tickStep)
+                        : Format.MemoryTick(tick * tickStep);
                     g.DrawString(label, Font, muted, plot.Left - 6 * s, y, farMiddle);
                 }
 
@@ -904,18 +934,38 @@ namespace ProcessStreamgraph
                 hoverProcess = null;
             }
             bool overToggle = mouseInside && mouse.Y < HeadingHeight;
-            Cursor = hoverProcess != null || overToggle || (CanElevate && !collapsed) ? Cursors.Hand : Cursors.Default;
+            Cursor = dragStartY >= 0 || (mouseInside && OnResizeEdge(mouse.Y)) ? Cursors.SizeNS
+                : hoverProcess != null || overToggle || (CanElevate && !collapsed) ? Cursors.Hand
+                : Cursors.Default;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (dragStartY >= 0)
+            {
+                // Screen coordinates, since the control moves and resizes under the pointer as it is dragged.
+                HeightDragged?.Invoke(dragStartHeight + Cursor.Position.Y - dragStartY);
+                return;
+            }
             bool wasHovering = hoverProcess != null;
             mouseInside = true;
             mouse = e.Location;
             UpdateHover();
             // The tooltip follows the pointer, so any move over a layer needs a repaint.
             if (wasHovering || hoverProcess != null) Invalidate();
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            dragStartY = -1;
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            dragStartY = -1;    // the drag ends however the mouse is let go, even outside the window
         }
 
         protected override void OnMouseLeave(EventArgs e)
@@ -932,6 +982,17 @@ namespace ProcessStreamgraph
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left && OnResizeEdge(e.Y))
+            {
+                if (e.Clicks == 2)
+                {
+                    HeightResetRequested?.Invoke();
+                    return;
+                }
+                dragStartY = Cursor.Position.Y;
+                dragStartHeight = Height;
+                return;
+            }
             if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) return;
             if (e.Button == MouseButtons.Left && e.Y < HeadingHeight)
             {
