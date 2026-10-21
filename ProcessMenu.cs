@@ -195,18 +195,29 @@ namespace ProcessStreamgraph
             return IntPtr.Zero;
         }
 
-        private void EndTask()
+        private void EndTask() => ConfirmEndTask(target);
+
+        /// <summary>
+        /// Asks before ending the process, as the menu's End Task does, and reports a failure. True when
+        /// it was ended.
+        /// </summary>
+        /// <param name="dialogOwner">The window to show the questions over; the main window when null.</param>
+        public bool ConfirmEndTask(ProcInfo process, IWin32Window dialogOwner = null)
         {
-            DialogResult answer = MessageBox.Show(owner,
-                $"End {target.DisplayName} ({target.Name}, PID {target.Pid})?\n\nAny unsaved data in it will be lost.", "End Task",
+            dialogOwner = dialogOwner ?? owner;
+            DialogResult answer = MessageBox.Show(dialogOwner,
+                $"End {process.DisplayName} ({process.Name}, PID {process.Pid})?\n\nAny unsaved data in it will be lost.", "End Task",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-            if (answer == DialogResult.Yes) Report(ProcessActions.EndTask(target));
+            if (answer != DialogResult.Yes) return false;
+            string error = ProcessActions.EndTask(process);
+            Report(error, dialogOwner);
+            return error == null;
         }
 
-        private void Report(string error)
+        private void Report(string error, IWin32Window dialogOwner = null)
         {
             if (error != null)
-                MessageBox.Show(owner, error, "Process Streamgraph", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(dialogOwner ?? owner, error, "Process Streamgraph", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

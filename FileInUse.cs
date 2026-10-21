@@ -166,6 +166,25 @@ namespace ProcessStreamgraph
             }
         }
 
+        /// <summary>
+        /// The processes whose working folder is the folder or inside it. Windows keeps that folder open
+        /// for them, so it cannot be renamed or deleted, yet the Restart Manager does not see it, since no
+        /// file in it is open. Every process is read, not only shells: a dev server or any program
+        /// started from the folder holds it the same way.
+        /// </summary>
+        public static List<FileHolder> WorkingInside(string folder, List<ProcInfo> processes)
+        {
+            string prefix = folder.TrimEnd('\\') + "\\";
+            var holders = new List<FileHolder>();
+            foreach (ProcInfo p in processes)
+            {
+                string working = NativeMethods.GetCurrentDirectory(p.Pid) ?? p.WorkingFolder;
+                if (working == null || !(working.TrimEnd('\\') + "\\").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                holders.Add(new FileHolder { Pid = p.Pid, StartTime = p.CreateTime, AppName = p.DisplayName, Kind = "Working in the folder", WorkingFolder = true });
+            }
+            return holders;
+        }
+
         private static string KindOf(RM_PROCESS_INFO info)
         {
             switch (info.ApplicationType)
@@ -193,6 +212,7 @@ namespace ProcessStreamgraph
         private readonly float scale;
         private readonly Action<ProcInfo> showInList;
         private readonly Action<ProcInfo, Point> showMenu;
+        private readonly Func<ProcInfo, IWin32Window, bool> endTask;
         private readonly Action restartElevated;
         private readonly TextBox path;
         private readonly Button find, browse, show, elevate;
@@ -203,14 +223,17 @@ namespace ProcessStreamgraph
 
         /// <param name="showInList">Selects a process in the main window's process list.</param>
         /// <param name="showMenu">Opens the process menu at a screen position.</param>
+        /// <param name="endTask">Asks over the given window, then ends the process; true when it was ended.</param>
         public FileInUseForm(ProcessMonitor monitor, IconCache icons, Theme theme, int dpi, Font font,
-                             Action<ProcInfo> showInList, Action<ProcInfo, Point> showMenu, Action restartElevated)
+                             Action<ProcInfo> showInList, Action<ProcInfo, Point> showMenu,
+                             Func<ProcInfo, IWin32Window, bool> endTask, Action restartElevated)
         {
             this.monitor = monitor;
             this.icons = icons;
             this.theme = theme;
             this.showInList = showInList;
             this.showMenu = showMenu;
+            this.endTask = endTask;
             this.restartElevated = restartElevated;
             scale = dpi / 96f;
 
@@ -226,11 +249,12 @@ namespace ProcessStreamgraph
             ClientSize = new Size(S(900), S(420));
             MinimumSize = new Size(S(520), S(280));
 
-            path = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, S(2), S(6), 0) };
+            // Every row centres its controls vertically, with the same gaps and button heights throughout.
+            path = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 0, S(6), 0) };
             path.TextChanged += (s, e) => UpdateButtons();
-            browse = new Button { Text = "Browse…", AutoSize = true, Padding = new Padding(S(6), 0, S(6), 0) };
+            browse = new Button { Text = "Browse…", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(S(6), S(2), S(6), S(2)), Margin = Padding.Empty };
             browse.Click += (s, e) => Browse();
-            find = new Button { Text = "Find", AutoSize = true, Padding = new Padding(S(10), 0, S(10), 0), Margin = new Padding(S(6), 0, 0, 0) };
+            find = new Button { Text = "Find", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(S(10), S(2), S(10), S(2)), Margin = new Padding(S(6), 0, 0, 0) };
             find.Click += (s, e) => Find();
             AcceptButton = find;
 
@@ -251,8 +275,8 @@ namespace ProcessStreamgraph
                 Padding = new Padding(S(14), S(8), S(14), S(8)),
                 ForeColor = theme.MutedInk,
                 Text = "Type a path, browse, or drop a file or folder here to see which programs have it open. For a folder, every file " +
-                       $"inside is checked (up to {FileLocks.MaxFiles:N0}), along with command prompts working in it. " +
-                       "Double-click a program to find it in the process list; right-click it to end it."
+                       $"inside is checked (up to {FileLocks.MaxFiles:N0}), along with programs working in it, which are listed first. " +
+                       "Double-click a program to find it in the process list; press Delete or right-click it to end it."
             };
 
             list = new ListView
@@ -287,22 +311,37 @@ namespace ProcessStreamgraph
             {
                 if (e.Button == MouseButtons.Left) ShowSelected();
             };
+            list.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode != Keys.Delete || e.Modifiers != Keys.None || list.SelectedItems.Count == 0) return;
+                ListViewItem item = list.SelectedItems[0];
+                // Gone from the list once ended, so what is left shows what still holds the file.
+                if (item.Tag is ProcInfo process && endTask(process, this)) list.Items.Remove(item);
+                e.Handled = true;
+            };
             list.MouseUp += (s, e) =>
             {
                 if (e.Button == MouseButtons.Right && list.HitTest(e.Location).Item?.Tag is ProcInfo process)
                     showMenu(process, list.PointToScreen(e.Location));
             };
 
-            status = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(S(4), S(8), S(12), 0) };
-            show = new Button { Text = "Show in Process List", AutoSize = true, Padding = new Padding(S(6), S(2), S(6), S(2)) };
+            status = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(12), 0) };
+            show = new Button { Text = "Show in Process List", AutoSize = true, Anchor = AnchorStyles.Right, Padding = new Padding(S(6), S(2), S(6), S(2)), Margin = new Padding(S(6), 0, 0, 0) };
             show.Click += (s, e) => ShowSelected();
-            elevate = new Button { Text = "Restart as Administrator", AutoSize = true, Padding = new Padding(S(6), S(2), S(6), S(2)), Visible = false };
+            elevate = new Button { Text = "Restart as Administrator", AutoSize = true, Anchor = AnchorStyles.Right, Padding = new Padding(S(6), S(2), S(6), S(2)), Margin = new Padding(S(6), 0, 0, 0), Visible = false };
             elevate.Click += (s, e) => restartElevated();
-            var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel, Padding = new Padding(S(6), S(2), S(6), S(2)) };
+            var close = new Button { Text = "Close", AutoSize = true, Anchor = AnchorStyles.Right, DialogResult = DialogResult.Cancel, Padding = new Padding(S(6), S(2), S(6), S(2)), Margin = new Padding(S(6), 0, 0, 0) };
             close.Click += (s, e) => Close();
             CancelButton = close;
-            var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(S(10), S(6), S(10), S(10)) };
-            buttons.Controls.AddRange(new Control[] { close, show, elevate, status });
+            var buttons = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 4, Padding = new Padding(S(14), S(10), S(14), S(12)) };
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            buttons.Controls.Add(status, 0, 0);
+            buttons.Controls.Add(elevate, 1, 0);
+            buttons.Controls.Add(show, 2, 0);
+            buttons.Controls.Add(close, 3, 0);
 
             var listFrame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(S(14), 0, S(14), 0) };
             listFrame.Controls.Add(list);
@@ -407,20 +446,40 @@ namespace ProcessStreamgraph
             UpdateButtons();
             list.Items.Clear();
             elevate.Visible = false;
-            status.Text = isFolder ? "Checking the files in the folder…" : "Checking…";
+
+            // Programs working in the folder are found in a moment; the Restart Manager can take minutes
+            // over a big folder, so they are shown first rather than waiting on it.
+            var working = new List<FileHolder>();
+            if (isFolder)
+            {
+                status.Text = "Looking for programs working in the folder…";
+                List<ProcInfo> live = new List<ProcInfo>(monitor.Processes).FindAll(p => p.Alive);
+                working = await Task.Run(() => FileLocks.WorkingInside(target, live));
+                if (IsDisposed) return;
+                ShowResults(working, null);
+            }
+
+            var started = DateTime.UtcNow;
+            int fileCount = 0;
+            string checking = null;
+            var ticker = new Timer { Interval = 1000 };
+            ticker.Tick += (s, e) =>
+            {
+                if (checking != null && !IsDisposed) status.Text = Prefix(working) + checking + $" {DateTime.UtcNow - started:m\\:ss}";
+            };
+            ticker.Start();
             List<FileHolder> holders;
             string summary;
             try
             {
                 bool truncated = false;
-                int fileCount = 0;
-                holders = await Task.Run(() =>
-                {
-                    List<string> files = FileLocks.FilesOf(target, out truncated);
-                    fileCount = files.Count;
-                    return files.Count > 0 ? FileLocks.Find(files) : new List<FileHolder>();
-                });
-                if (isFolder) AddShellsInside(target, holders);
+                List<string> files = await Task.Run(() => FileLocks.FilesOf(target, out truncated));
+                fileCount = files.Count;
+                checking = !isFolder ? "Checking…" : $"Checking {fileCount:N0} files, which can take minutes for a big folder…";
+                status.Text = Prefix(working) + checking;
+                holders = files.Count > 0 ? await Task.Run(() => FileLocks.Find(files)) : new List<FileHolder>();
+                foreach (FileHolder holder in working)
+                    if (!holders.Exists(h => h.Pid == holder.Pid)) holders.Add(holder);
                 string found = holders.Count == 0 ? "No running program has it open"
                     : holders.Count == 1 ? "1 program has it open" : $"{holders.Count} programs have it open";
                 summary = !isFolder ? found + "."
@@ -428,31 +487,23 @@ namespace ProcessStreamgraph
             }
             catch (Win32Exception e)
             {
-                holders = new List<FileHolder>();
-                summary = "Windows could not check: " + e.Message;
+                // What was found working in the folder still stands.
+                holders = working;
+                summary = Prefix(working) + "Windows could not check the files: " + e.Message;
             }
             finally
             {
+                ticker.Dispose();
                 searching = false;
             }
             if (IsDisposed) return;
             ShowResults(holders, summary);
         }
 
-        /// <summary>Shells and script hosts whose working folder is the folder or inside it, which holds it open too.</summary>
-        private void AddShellsInside(string folder, List<FileHolder> holders)
-        {
-            string prefix = folder.TrimEnd('\\') + "\\";
-            foreach (ProcInfo p in monitor.Processes)
-            {
-                if (!p.Alive || p.WorkingFolder == null) continue;
-                string working = p.WorkingFolder.TrimEnd('\\') + "\\";
-                if (!working.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                if (holders.Exists(h => h.Pid == p.Pid)) continue;
-                holders.Add(new FileHolder { Pid = p.Pid, StartTime = p.CreateTime, AppName = p.DisplayName, Kind = "Working in the folder", WorkingFolder = true });
-            }
-        }
+        private static string Prefix(List<FileHolder> working) =>
+            working.Count == 0 ? "" : working.Count == 1 ? "1 program is working in the folder. " : $"{working.Count} programs are working in the folder. ";
 
+        /// <param name="summary">The finished search's summary, or null while files are still being checked.</param>
         private void ShowResults(List<FileHolder> holders, string summary)
         {
             list.BeginUpdate();
@@ -472,6 +523,11 @@ namespace ProcessStreamgraph
             }
             list.EndUpdate();
             if (list.Items.Count > 0) list.Items[0].Selected = true;
+            if (summary == null)
+            {
+                UpdateButtons();
+                return;
+            }
 
             // Without administrator rights, the Restart Manager cannot see into elevated programs and
             // other users' processes.

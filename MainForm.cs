@@ -81,6 +81,12 @@ namespace ProcessStreamgraph
             };
             tree.KeyDown += (s, e) =>
             {
+                if (e.KeyCode == Keys.Delete && e.Modifiers == Keys.None && tree.SelectedNode?.Tag is ProcInfo selected)
+                {
+                    processMenu.ConfirmEndTask(selected);
+                    e.Handled = true;
+                    return;
+                }
                 // The keyboard's menu key, and its Shift+F10 equivalent, open the menu for the selected row.
                 bool menuKey = e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift);
                 if (!menuKey || tree.SelectedNode == null) return;
@@ -294,7 +300,7 @@ namespace ProcessStreamgraph
             {
                 Minimum = 0,
                 Maximum = TimeSpans.Length - 1,
-                Value = TimeSpans.Length - 1,
+                Value = Array.IndexOf(TimeSpans, 30),
                 LargeChange = 1,
                 TickStyle = TickStyle.None,
                 AutoSize = false,
@@ -303,6 +309,7 @@ namespace ProcessStreamgraph
                 Anchor = AnchorStyles.Left
             };
             var shown = new Label { AutoSize = true, Anchor = AnchorStyles.Left, Text = SpanText(TimeSpans[timeSpan.Value]) };
+            foreach (StreamGraphControl graph in streamGraphs) graph.VisibleSeconds = TimeSpans[timeSpan.Value];
             timeSpan.ValueChanged += (s, e) =>
             {
                 int seconds = TimeSpans[timeSpan.Value];
@@ -661,7 +668,8 @@ namespace ProcessStreamgraph
                 return;
             }
             fileInUseForm = new FileInUseForm(monitor, icons, theme, DeviceDpi, tree.Font, SelectInTree,
-                (process, location) => processMenu.Show(process, location), RestartElevated);
+                (process, location) => processMenu.Show(process, location),
+                (process, owner) => processMenu.ConfirmEndTask(process, owner), RestartElevated);
             fileInUseForm.FormClosed += (s, e) =>
             {
                 fileInUseForm.Dispose();
