@@ -986,7 +986,7 @@ namespace ProcessStreamgraph
         private static readonly Dictionary<string, string> RoleNotes = new Dictionary<string, string>
         {
             ["Main process"] = "The program's main process: it owns the windows and starts the helper processes below it.",
-            ["Page renderer"] = "Draws and runs web content: one or more tabs, frames or app windows. Chromium-based programs do not say which; their own task manager (Shift+Esc in a browser) does.",
+            ["Page renderer"] = "Draws and runs web content: one or more tabs, frames or app windows. Chromium-based programs do not say which; for browsers, the site and page title are guesses from the renderer's memory and its browser's, shown only when one clearly leads. The browser's own task manager (Shift+Esc) knows for sure.",
             ["Extension renderer"] = "Runs browser extensions' background pages and scripts.",
             ["GPU process"] = "Does the program's graphics work on the graphics card, for every tab and window.",
             ["Crash reporter"] = "Waits to collect a crash report if another of the program's processes fails.",
@@ -1015,6 +1015,16 @@ namespace ProcessStreamgraph
                 text.Append(p.Role);
                 string role = p.Role.StartsWith("WebView2") ? null : p.Role.Split(new[] { " for " }, StringSplitOptions.None)[0];
                 if (role != null && RoleNotes.TryGetValue(role, out string note)) text.AppendLine().Append(Wrap(note, 100, ""));
+            }
+            if (p.Site != null)
+            {
+                if (text.Length > 0) text.AppendLine();
+                text.Append("Showing ").Append(p.Site).Append(" (a guess from the addresses in its memory)");
+            }
+            if (p.PageTitle != null)
+            {
+                if (text.Length > 0) text.AppendLine();
+                text.Append("Page: “").Append(p.PageTitle).Append("” (a guess from its memory and its browser's)");
             }
             if (p.WorkingFolder != null)
             {

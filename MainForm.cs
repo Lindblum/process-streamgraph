@@ -478,6 +478,7 @@ namespace ProcessStreamgraph
             ProcessActions.UpdateWindowStates(monitor.Processes);
             ServiceDirectory.Update(monitor);
             WorkingFolders.Update(monitor);
+            RendererPages.Update(monitor);
             SyncTree();
             foreach (StreamGraphControl graph in streamGraphs) graph.Rebuild();
         }

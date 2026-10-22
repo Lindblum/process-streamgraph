@@ -37,7 +37,9 @@ namespace ProcessStreamgraph
         public ServiceInfo[] Services;   // Windows services it hosts; null when none
         public string WindowTitle;       // title of its frontmost window; null when it has none
         public string WorkingFolder;     // for shells, script hosts and command-line tools; null otherwise
-        public string Details = "";      // the four above, as the Details column shows them
+        public string Site;              // for browser page renderers, the site they show, guessed; null when unclear
+        public string PageTitle;         // for browser page renderers, the title of the page they show, guessed; null when unclear
+        public string Details = "";      // the six above, as the Details column shows them
         public Dictionary<Endpoint, Connection> Connections;   // traffic by remote endpoint; null before any
         public TreeNode Node;
 
@@ -91,6 +93,8 @@ namespace ProcessStreamgraph
             {
                 parts.Add(Role);
             }
+            if (Site != null) parts.Add(Site);
+            if (PageTitle != null) parts.Add("“" + PageTitle + "”");
             if (WorkingFolder != null) parts.Add("in " + ShortFolder(WorkingFolder));
             if (!string.IsNullOrEmpty(WindowTitle)) parts.Add("\u201C" + WindowTitle + "\u201D");
             Details = string.Join("  \u00B7  ", parts);

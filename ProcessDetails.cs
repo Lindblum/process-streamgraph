@@ -29,7 +29,7 @@ namespace ProcessStreamgraph
         private static readonly Regex WebViewHost = new Regex(@"--webview-exe-name=([^\s""]+)", RegexOptions.Compiled);
         private static readonly Regex ComServer = new Regex(@"/Processid:(\{[0-9A-Fa-f-]{36}\})", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-        private const string PageRenderer = "Page renderer";
+        public const string PageRenderer = "Page renderer";
 
         private static readonly Dictionary<string, string> UtilityServices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
