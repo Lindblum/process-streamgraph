@@ -10,14 +10,14 @@ A Windows process monitor that draws CPU, memory, GPU and network use as stacked
 - **Task Manager–consistent totals.** A striped band shows what no process is charged for (interrupts and DPCs for CPU, kernel and shared memory for memory), so the totals match Task Manager.
 - **Process tree** with details for each process: services hosted, window titles, working folders, and the role of browser helper processes.
 - **Safety ratings** for programs and the network hosts they talk to, from configurable online sources.
-- **Connections** shows the remote hosts each process exchanges data with.
+- **Connections tab** shows the remote hosts every process exchanges data with, or one process when filtered by PID, with each address's location and owner, the port, a guess at what the connection is for (the service or API behind the host name), and a streamgraph of the data rates by host.
 - **File in Use** finds the processes holding a file or folder open when Windows won't delete it.
 - Light and dark themes, a time span slider, resizable and collapsible graphs.
 
 ## Requirements
 
 - Windows 10 or 11 with .NET Framework 4.7.2 or later.
-- Per-process network traffic needs administrator rights. Without them, the Connections window lists open TCP connections only.
+- Per-process network traffic needs administrator rights. Without them, the Connections tab lists open TCP connections only.
 
 ## Building
 

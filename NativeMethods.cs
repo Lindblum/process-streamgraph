@@ -125,6 +125,9 @@ namespace ProcessStreamgraph
         public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
 
         [DllImport("user32.dll")]
+        public static extern bool InvalidateRect(IntPtr hWnd, IntPtr rect, bool erase);
+
+        [DllImport("user32.dll")]
         public static extern int GetDpiForWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]

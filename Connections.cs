@@ -78,6 +78,33 @@ namespace ProcessStreamgraph
         public long Sent, Received;     // bytes
         public DateTime LastActive;     // local time of the last traffic, or when it was last seen open
         public string State;            // TCP state from the connection table, when that is the source
+        // Bytes moved in each sample that had any traffic, oldest first; quiet samples are left out,
+        // since most endpoints are idle most of the time.
+        public readonly List<Moved> History = new List<Moved>();
+
+        internal void Record(long sample, long sent, long received, long oldest)
+        {
+            int last = History.Count - 1;
+            if (last >= 0 && History[last].Sample == sample)
+                History[last] = new Moved(sample, History[last].Sent + sent, History[last].Received + received);
+            else History.Add(new Moved(sample, sent, received));
+            int stale = 0;
+            while (stale < History.Count && History[stale].Sample < oldest) stale++;
+            if (stale > 0) History.RemoveRange(0, stale);
+        }
+    }
+
+    /// <summary>The bytes a connection moved each way in one sample.</summary>
+    internal readonly struct Moved
+    {
+        public readonly long Sample, Sent, Received;
+
+        public Moved(long sample, long sent, long received)
+        {
+            Sample = sample;
+            Sent = sent;
+            Received = received;
+        }
     }
 
     /// <summary>Names, labels and the connection table, for the Connections window.</summary>
@@ -105,6 +132,15 @@ namespace ProcessStreamgraph
             return null;
         }
 
+        /// <summary>Whether an address is on the internet ("Public"), this computer or a private network ("Private"), or a group ("Multicast", "Broadcast").</summary>
+        public static string Scope(IPAddress address)
+        {
+            byte[] b = address.GetAddressBytes();
+            if (b.Length == 4 ? b[0] >= 224 && b[0] <= 239 : address.IsIPv6Multicast) return "Multicast";
+            if (b.Length == 4 && b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255) return "Broadcast";
+            return LocalLabel(address) != null ? "Private" : "Public";
+        }
+
         /// <summary>What usually runs on a port, for the common ones.</summary>
         public static string PortName(ushort port, bool udp)
         {
@@ -128,6 +164,38 @@ namespace ProcessStreamgraph
                 case 137: case 138: case 139: return "NetBIOS";
                 case 5228: return "Google push";
                 case 27015: case 27036: return "Steam";
+                case 8080: case 8000: return "HTTP (alternate)";
+                case 8443: return "HTTPS (alternate)";
+                case 21: return "File transfer (FTP)";
+                case 23: return "Telnet";
+                case 143: return "Mail (IMAP)";
+                case 110: return "Mail (POP3)";
+                case 5222: return "Chat (XMPP)";
+                case 5223: return "Apple push";
+                case 1883: case 8883: return "IoT messages (MQTT)";
+                case 500: case 4500: return "VPN (IPsec)";
+                case 1194: return "VPN (OpenVPN)";
+                case 51820: return "VPN (WireGuard)";
+                case 1701: return "VPN (L2TP)";
+                case 1723: return "VPN (PPTP)";
+                case 7680: return "Windows Update sharing";
+                case 5938: return "TeamViewer";
+                case 5900: return "Remote screen (VNC)";
+                case 3074: return "Xbox Live";
+                case 4070: return "Spotify";
+                case 8009: return "Chromecast";
+                case 554: return "Video stream (RTSP)";
+                case 3306: return "Database (MySQL)";
+                case 5432: return "Database (PostgreSQL)";
+                case 1433: return "Database (SQL Server)";
+                case 6379: return "Database (Redis)";
+                case 27017: return "Database (MongoDB)";
+                case 389: case 636: return "Directory (LDAP)";
+                case 88: return "Sign-in (Kerberos)";
+                case 67: case 68: return "Network setup (DHCP)";
+                case 161: case 162: return "Device management (SNMP)";
+                case 9100: case 631: return "Printing";
+                case 6881: case 6882: case 6883: case 6884: case 6885: case 6886: case 6887: case 6888: case 6889: return "BitTorrent";
                 default: return null;
             }
         }

@@ -37,7 +37,7 @@ namespace ProcessStreamgraph
             openLocation = new ToolStripMenuItem("Open File Location", null, (s, e) => Report(ProcessActions.OpenFileLocation(target.Path)));
             properties = new ToolStripMenuItem("Properties", null, (s, e) => Report(ProcessActions.ShowProperties(owner.Handle, target.Path)));
             safetyReport = new ToolStripMenuItem("Safety Report…", null, (s, e) => SafetyReportRequested?.Invoke(target));
-            connections = new ToolStripMenuItem("Connections…", null, (s, e) => ConnectionsRequested?.Invoke(target));
+            connections = new ToolStripMenuItem("Show Connections", null, (s, e) => ConnectionsRequested?.Invoke(target));
             copyValue = new ToolStripMenuItem("Copy Value");
             copyValue.Click += (s, e) => CopyText(copyValue.Tag as string);
             copyRow = new ToolStripMenuItem("Copy Row", null, (s, e) => CopyText(CellMenu.RowText(cells)));

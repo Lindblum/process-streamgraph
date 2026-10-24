@@ -19,6 +19,7 @@ namespace ProcessStreamgraph
         public string AbuseChKey = "";
         public bool UseLists = true;     // CISA's exploited-vulnerability list, endoflife.date and the malware host lists; no account needed
         public bool AskDnsFilters = true;    // ask Cloudflare's and Quad9's malware-blocking DNS about the domains processes talk to
+        public bool LookUpAddresses = true;  // ask ipwho.is where public addresses are and who holds them
 
         public string KeyFor(string source)
         {
@@ -57,6 +58,7 @@ namespace ProcessStreamgraph
                 settings.AbuseChKey = Json.Str(root, "abuseCh") ?? "";
                 settings.UseLists = Json.Get(root, "useLists") is bool useLists ? useLists : true;
                 settings.AskDnsFilters = Json.Get(root, "askDnsFilters") is bool askDns ? askDns : true;
+                settings.LookUpAddresses = Json.Get(root, "lookUpAddresses") is bool lookUp ? lookUp : true;
             }
             catch (Exception e) when (e is IOException || e is CryptographicException || e is UnauthorizedAccessException)
             {
@@ -73,7 +75,8 @@ namespace ProcessStreamgraph
                 ["metaDefender"] = settings.MetaDefenderKey,
                 ["abuseCh"] = settings.AbuseChKey,
                 ["useLists"] = settings.UseLists,
-                ["askDnsFilters"] = settings.AskDnsFilters
+                ["askDnsFilters"] = settings.AskDnsFilters,
+                ["lookUpAddresses"] = settings.LookUpAddresses
             });
             Directory.CreateDirectory(Folder);
             File.WriteAllBytes(SettingsFile, ProtectedData.Protect(Encoding.UTF8.GetBytes(json), Entropy, DataProtectionScope.CurrentUser));

@@ -312,7 +312,7 @@ namespace ProcessStreamgraph
     internal sealed class SafetySourcesForm : Form
     {
         private readonly TextBox virusTotal, metaDefender, abuseCh;
-        private readonly CheckBox useLists, askDnsFilters;
+        private readonly CheckBox useLists, askDnsFilters, lookUpAddresses;
         private readonly Theme theme;
         private readonly float scale;
 
@@ -394,6 +394,18 @@ namespace ProcessStreamgraph
             Note("Both run free DNS services that refuse to look up domains known for malware and phishing. Each domain shown " +
                  "in a Connections window is looked up there to see whether it is refused, which tells them the domain name only.");
 
+            Note("Address details (no account needed)", true);
+            lookUpAddresses = new CheckBox
+            {
+                Text = "Ask ipwho.is where the public addresses in the Connections window are, and who owns them",
+                Checked = settings.LookUpAddresses, AutoSize = true, Margin = new Padding(0, S(2), 0, S(2))
+            };
+            layout.Controls.Add(lookUpAddresses, 0, layout.RowCount);
+            layout.SetColumnSpan(lookUpAddresses, 3);
+            layout.RowCount++;
+            Note("Fills the Location and Owner columns. One address from each block of 256 is sent, and the " +
+                 "answer is kept for a month. Free for non-commercial use, up to a monthly limit.");
+
             Note("Malware scanners (free API key each)", true);
             Note("Each program's SHA-256 fingerprint is sent to look it up; the files themselves are never uploaded. " +
                  "Keys are stored encrypted for your Windows account. VirusTotal's free API is for non-commercial use.");
@@ -437,7 +449,8 @@ namespace ProcessStreamgraph
             MetaDefenderKey = metaDefender.Text.Trim(),
             AbuseChKey = abuseCh.Text.Trim(),
             UseLists = useLists.Checked,
-            AskDnsFilters = askDnsFilters.Checked
+            AskDnsFilters = askDnsFilters.Checked,
+            LookUpAddresses = lookUpAddresses.Checked
         };
     }
 }

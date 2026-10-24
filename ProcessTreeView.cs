@@ -357,7 +357,12 @@ namespace ProcessStreamgraph
 
         private readonly int[] widths = (int[])DefaultWidths.Clone();
         private readonly bool[] shown = { true, true, true, true, true, true, true, true, true, true, true };
-        private readonly List<TreeColumn> order = new List<TreeColumn>(Columns);    // left to right; the name always first
+        private static readonly TreeColumn[] DefaultOrder =
+        {
+            TreeColumn.Name, TreeColumn.FileName, TreeColumn.Pid, TreeColumn.Details, TreeColumn.Cpu, TreeColumn.Memory,
+            TreeColumn.Network, TreeColumn.WindowStatus, TreeColumn.Safety, TreeColumn.Started, TreeColumn.Arguments
+        };
+        private readonly List<TreeColumn> order = new List<TreeColumn>(DefaultOrder);    // left to right; the name always first
         private TreeNode hotNode;       // row under the mouse
         private readonly ToolTip safetyTip = new ToolTip { AutoPopDelay = 30000, InitialDelay = 400, ReshowDelay = 100 };
         private string safetyTipText;
@@ -474,7 +479,7 @@ namespace ProcessStreamgraph
         {
             switch (column)
             {
-                case TreeColumn.Name: return "Name";
+                case TreeColumn.Name: return "Process Name";
                 case TreeColumn.FileName: return "File Name";
                 case TreeColumn.Details: return "Details";
                 case TreeColumn.Cpu: return "CPU (%)";

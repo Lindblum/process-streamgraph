@@ -218,7 +218,7 @@ namespace ProcessStreamgraph
         private readonly Button find, browse, show, elevate;
         private readonly ListView list;
         private readonly Label status;
-        private ConnectionsForm.HeaderFiller headerFiller;
+        private ConnectionsView.HeaderFiller headerFiller;
         private bool searching;
 
         /// <param name="showInList">Selects a process in the main window's process list.</param>
@@ -303,7 +303,7 @@ namespace ProcessStreamgraph
             list.HandleCreated += (s, e) =>
             {
                 NativeMethods.SetWindowTheme(list.Handle, theme.IsDark ? "DarkMode_Explorer" : null, null);
-                headerFiller = new ConnectionsForm.HeaderFiller(list, theme);
+                headerFiller = new ConnectionsView.HeaderFiller(list, theme);
             };
             list.HandleDestroyed += (s, e) => headerFiller?.ReleaseHandle();
             list.SelectedIndexChanged += (s, e) => UpdateButtons();

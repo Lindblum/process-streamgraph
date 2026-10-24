@@ -25,6 +25,7 @@ namespace ProcessStreamgraph
     {
         private const float MinDrawnThickness = 0.4f;   // px; thinner stretches are left to the silhouette
         private const float MinSeparatedThickness = 3f; // px; thinner stretches get no separator line
+        private const double ScaleEaseSeconds = 0.15;   // how quickly the value axis follows a new peak
 
         private struct Layer
         {
@@ -55,6 +56,7 @@ namespace ProcessStreamgraph
         private double fullScale;               // the value that reads as 100%; 0 when there is none, as for network
         private int visibleSeconds = ProcessMonitor.HistorySeconds;
         private double scaleMax = 1, tickStep = 1;
+        private double shownMax;                // the scale as drawn, eased towards scaleMax; 0 before the first
         private RectangleF plot;
         private float[] xs = new float[0];      // x of each sample were the newest at the plot's right edge
         private float pixelsPerUnit;
@@ -332,7 +334,9 @@ namespace ProcessStreamgraph
                 tickStep = fullScale / 10;
                 scaleMax = Math.Max(1, Math.Ceiling(maxTotal / tickStep)) * tickStep;
             }
-            pixelsPerUnit = (float)(plot.Height / scaleMax);
+            // A new scale is eased into by Animate rather than jumped to, unless there is nothing drawn yet.
+            if (shownMax <= 0 || !HasPlot) shownMax = scaleMax;
+            pixelsPerUnit = (float)(plot.Height / shownMax);
 
             Array.Clear(cum, 0, n);
             for (int l = 0; l < layers.Length; l++)
@@ -369,6 +373,7 @@ namespace ProcessStreamgraph
             double elapsed = lastFrame > 0 ? Math.Min(clock - lastFrame, 0.25) : 0;
             lastFrame = clock;
             if (!HasPlot || double.IsNaN(viewTime)) return;
+            if (shownMax != scaleMax) EaseScale(elapsed);
 
             // Run with the clock, eased towards the target lag: faster when behind it, slower when
             // ahead, and never backwards, so the motion stays steady when the interval changes.
@@ -377,6 +382,20 @@ namespace ProcessStreamgraph
             viewTime += elapsed * speed;
             ClampViewTime();
             UpdatePan();
+        }
+
+        /// <summary>
+        /// Moves the drawn scale towards the one the data needs, by a share of the remaining ratio each
+        /// frame: quick at first, gentle at the end, and as smooth for a tenfold change as a twofold one.
+        /// </summary>
+        private void EaseScale(double elapsed)
+        {
+            double gap = Math.Log(scaleMax / shownMax) * Math.Exp(-elapsed / ScaleEaseSeconds);
+            shownMax = Math.Abs(gap) < 0.003 ? scaleMax : scaleMax / Math.Exp(gap);
+            pixelsPerUnit = (float)(plot.Height / shownMax);
+            RenderCache();
+            if (mouseInside) UpdateHover();
+            Invalidate();
         }
 
         // The display never runs ahead of the data, which would leave a gap at the right edge, and
@@ -691,7 +710,7 @@ namespace ProcessStreamgraph
 
                 // Value axis, with the zero line at the bottom: a gridline every 10% of the full scale,
                 // or at each rate step for network traffic.
-                int ticks = (int)Math.Round(scaleMax / tickStep);
+                int ticks = (int)Math.Floor(shownMax / tickStep + 0.001);     // those below the top while the scale eases
                 for (int tick = 0; tick <= ticks; tick++)
                 {
                     float y = (float)Math.Round(Y((float)(tick * tickStep)));

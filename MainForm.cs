@@ -19,15 +19,19 @@ namespace ProcessStreamgraph
         private readonly Panel graphScroll;    // scrolls the graphs when they do not all fit at their minimum height
         private readonly Panel graphFiller;
         private readonly SplitContainer split;
+        private readonly TabStrip tabs;
+        private readonly Panel processesPage, connectionsPage;
+        private ConnectionsView connectionsView;    // made when its tab is first shown
         private readonly Timer timer;
         private readonly Timer animation;      // pans the graphs between samples
         private Control toolbar;
         private ComboBox[] dropdowns;
+        private ComboBox layerSort, systemBand;     // in the Processes tab's bar above the graphs
         private NumericUpDown refreshSeconds;
         private Button safetySources, fileInUse;
         private FileInUseForm fileInUseForm;
         // Lengths of the time axis, in seconds, that the time span slider steps through.
-        private static readonly int[] TimeSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
+        internal static readonly int[] TimeSpans = { 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, ProcessMonitor.HistorySeconds };
         private Control timeBar;
         private TrackBar timeSpan;
         private const int MinGraphHeight = 200;     // an open graph's least automatic height, in 96-DPI units
@@ -141,7 +145,15 @@ namespace ProcessStreamgraph
             split.Panel2.Controls.Add(graphScroll);
             split.Panel2.Controls.Add(timeBar = BuildTimeBar());
 
-            Controls.Add(split);
+            // Below the toolbar, a tab for the processes and their graphs, and one for a process's connections.
+            processesPage = new Panel { Dock = DockStyle.Fill };
+            processesPage.Controls.Add(split);
+            connectionsPage = new Panel { Dock = DockStyle.Fill, Visible = false };
+            tabs = new TabStrip("Processes", "Connections");
+            tabs.SelectedChanged += ShowTab;
+            Controls.Add(processesPage);
+            Controls.Add(connectionsPage);
+            Controls.Add(tabs);
             Controls.Add(toolbar = BuildToolbar());
             split.SplitterDistance = TreeWidth;
             ApplyTheme(Theme.SystemDefault);
@@ -304,7 +316,7 @@ namespace ProcessStreamgraph
                 LargeChange = 1,
                 TickStyle = TickStyle.None,
                 AutoSize = false,
-                Width = 220,
+                Width = 120,
                 Height = 26,
                 Anchor = AnchorStyles.Left
             };
@@ -319,10 +331,39 @@ namespace ProcessStreamgraph
             bar.Controls.Add(new Label { Text = "Time span:", AutoSize = true, Anchor = AnchorStyles.Left });
             bar.Controls.Add(timeSpan);
             bar.Controls.Add(shown);
+
+            // How the layers are stacked, which only this tab's graphs need.
+            layerSort = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130, Anchor = AnchorStyles.Left };
+            layerSort.Items.AddRange(new object[] { "Usage", "Start time", "Name", "Process ID" });
+            layerSort.SelectedIndex = 0;
+            layerSort.SelectedIndexChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.SortMode = (SortMode)layerSort.SelectedIndex;
+            };
+
+            var reverse = new CheckBox { Text = "Reverse", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(6, 3, 18, 3) };
+            reverse.CheckedChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.Reverse = reverse.Checked;
+            };
+
+            systemBand = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90, Anchor = AnchorStyles.Left };
+            systemBand.Items.AddRange(new object[] { "On top", "At bottom" });
+            systemBand.SelectedIndex = 0;
+            systemBand.SelectedIndexChanged += (s, e) =>
+            {
+                foreach (StreamGraphControl graph in streamGraphs) graph.SystemBandAtBottom = systemBand.SelectedIndex == 1;
+            };
+
+            bar.Controls.Add(new Label { Text = "Sort layers by:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(21, 0, 3, 0) });
+            bar.Controls.Add(layerSort);
+            bar.Controls.Add(reverse);
+            bar.Controls.Add(new Label { Text = "System band:", AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(systemBand);
             return bar;
         }
 
-        private static string SpanText(int seconds) =>
+        internal static string SpanText(int seconds) =>
             seconds < 60 ? seconds + " s" : seconds % 60 == 0 ? seconds / 60 + " min" : (seconds / 60.0).ToString("0.#") + " min";
 
         private Control BuildToolbar()
@@ -336,28 +377,6 @@ namespace ProcessStreamgraph
                 Padding = new Padding(6, 4, 6, 4)
             };
 
-            var sort = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
-            sort.Items.AddRange(new object[] { "Usage", "Start time", "Name", "Process ID" });
-            sort.SelectedIndex = 0;
-            sort.SelectedIndexChanged += (s, e) =>
-            {
-                foreach (StreamGraphControl graph in streamGraphs) graph.SortMode = (SortMode)sort.SelectedIndex;
-            };
-
-            var reverse = new CheckBox { Text = "Reverse", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(6, 3, 18, 3) };
-            reverse.CheckedChanged += (s, e) =>
-            {
-                foreach (StreamGraphControl graph in streamGraphs) graph.Reverse = reverse.Checked;
-            };
-
-            var systemBand = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 90 };
-            systemBand.Items.AddRange(new object[] { "On top", "At bottom" });
-            systemBand.SelectedIndex = 0;
-            systemBand.SelectedIndexChanged += (s, e) =>
-            {
-                foreach (StreamGraphControl graph in streamGraphs) graph.SystemBandAtBottom = systemBand.SelectedIndex == 1;
-            };
-
             var themes = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
             themes.Items.Add("System default");
             foreach (Theme theme in Theme.All) themes.Items.Add(theme.Name);
@@ -369,12 +388,7 @@ namespace ProcessStreamgraph
             };
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
-            bar.Controls.Add(new Label { Text = "Sort layers by:", AutoSize = true, Anchor = AnchorStyles.Left });
-            bar.Controls.Add(sort);
-            bar.Controls.Add(reverse);
-            bar.Controls.Add(new Label { Text = "System band:", AutoSize = true, Anchor = AnchorStyles.Left });
-            bar.Controls.Add(systemBand);
-            bar.Controls.Add(new Label { Text = "Theme:", Margin = new Padding(21, 0, 3, 0), AutoSize = true, Anchor = AnchorStyles.Left });
+            bar.Controls.Add(new Label { Text = "Theme:", AutoSize = true, Anchor = AnchorStyles.Left });
             bar.Controls.Add(themes);
 
             refreshSeconds = new NumericUpDown
@@ -420,7 +434,7 @@ namespace ProcessStreamgraph
             };
             fileInUse.Click += (s, e) => ShowFileInUse();
             bar.Controls.Add(fileInUse);
-            dropdowns = new[] { sort, systemBand, themes };
+            dropdowns = new[] { layerSort, systemBand, themes };
             return bar;
         }
 
@@ -448,6 +462,9 @@ namespace ProcessStreamgraph
                 if (theme.IsDark) button.FlatAppearance.BorderColor = theme.Border;
             }
             split.BackColor = theme.Control;
+            tabs.Theme = theme;
+            processesPage.BackColor = connectionsPage.BackColor = theme.Control;
+            connectionsView?.ApplyTheme(theme);
             graphs.BackColor = theme.Border;
             graphFiller.BackColor = theme.Surface;
             graphScroll.BackColor = theme.Surface;
@@ -630,11 +647,40 @@ namespace ProcessStreamgraph
             form.Show(this);
         }
 
+        /// <summary>Switches to the Connections tab, showing the process's connections.</summary>
         private void ShowConnections(ProcInfo process)
         {
-            var form = new ConnectionsForm(process, monitor, safety, theme, DeviceDpi, tree.Font, RestartElevated);
-            form.FormClosed += (s, e) => form.Dispose();
-            form.Show(this);
+            tabs.SelectedIndex = 1;
+            connectionsView.ShowProcess(process);
+        }
+
+        private void ShowTab()
+        {
+            bool connections = tabs.SelectedIndex == 1;
+            if (connections && connectionsView == null)
+            {
+                // Made only now, when the window has been scaled for its monitor, since its sizes are worked out from that.
+                connectionsView = new ConnectionsView(monitor, safety, theme, DeviceDpi, tree.Font, RestartElevated) { Dock = DockStyle.Fill };
+                connectionsView.ProcessRequested += process =>
+                {
+                    tabs.SelectedIndex = 0;
+                    SelectInTree(process);
+                };
+                connectionsPage.Controls.Add(connectionsView);
+            }
+            // The page shown first, so the switch never shows an empty window.
+            (connections ? connectionsPage : processesPage).Visible = true;
+            (connections ? processesPage : connectionsPage).Visible = false;
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // Ctrl+Tab and Ctrl+Shift+Tab, and Ctrl+Page Down and Up, step through the tabs, as in a browser.
+            int step = keyData == (Keys.Control | Keys.Tab) || keyData == (Keys.Control | Keys.PageDown) ? 1
+                : keyData == (Keys.Control | Keys.Shift | Keys.Tab) || keyData == (Keys.Control | Keys.PageUp) ? -1 : 0;
+            if (step == 0) return base.ProcessCmdKey(ref msg, keyData);
+            tabs.SelectedIndex = (tabs.SelectedIndex + step + tabs.Count) % tabs.Count;
+            return true;
         }
 
         private void ShowServiceProperties(ServiceInfo service)

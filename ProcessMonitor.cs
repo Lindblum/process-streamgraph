@@ -59,7 +59,7 @@ namespace ProcessStreamgraph
         private const int MaxConnections = 4000;
 
         /// <summary>Adds traffic with one remote endpoint.</summary>
-        internal void AddTraffic(Endpoint remote, long sent, long received, DateTime now)
+        internal void AddTraffic(Endpoint remote, long sent, long received, DateTime now, long sample)
         {
             if (Connections == null) Connections = new Dictionary<Endpoint, Connection>();
             if (!Connections.TryGetValue(remote, out Connection connection))
@@ -76,6 +76,7 @@ namespace ProcessStreamgraph
             connection.Sent += sent;
             connection.Received += received;
             connection.LastActive = now;
+            connection.Record(sample, sent, received, sample - ProcessMonitor.HistoryLength + 1);
         }
 
         /// <summary>Rebuilds Details, and a service host's display name, after what they are made from changes.</summary>
@@ -316,7 +317,7 @@ namespace ProcessStreamgraph
                 DateTime now = DateTime.Now;
                 foreach (KeyValuePair<NetworkMonitor.Flow, NetworkMonitor.FlowBytes> flow in flows)
                     if (live.TryGetValue(flow.Key.Pid, out ProcInfo owner))
-                        owner.AddTraffic(flow.Key.Remote, flow.Value.Sent, flow.Value.Received, now);
+                        owner.AddTraffic(flow.Key.Remote, flow.Value.Sent, flow.Value.Received, now, SampleIndex);
             }
 
             foreach (ProcInfo p in all)
@@ -394,7 +395,7 @@ namespace ProcessStreamgraph
 
         // Hue follows the image name, so every instance of a program sits in one colour family;
         // lightness varies with the PID so neighbouring instances can still be told apart.
-        private static Color ColorFor(string name, int pid)
+        internal static Color ColorFor(string name, int pid)
         {
             uint hash = 2166136261;
             foreach (char c in name)
