@@ -3,6 +3,7 @@
 A Windows process monitor that draws CPU, memory, GPU and network use as stacked streamgraphs, one band per process, next to a process tree.
 
 ![Process Streamgraph](docs/screenshot.png)
+![Process Streamgraph](docs/screenshot2.png)
 
 ## Features
 
